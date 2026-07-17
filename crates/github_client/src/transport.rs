@@ -32,6 +32,10 @@ pub trait GithubTransport: Send + Sync + 'static {
     /// Executes a REST call, returning the raw response body. `path` is
     /// relative to the API root, e.g. `repos/o/r/pulls/1/files`.
     fn rest(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, TransportError>;
+
+    /// GETs a paginated list endpoint, following `Link` headers, and returns
+    /// the concatenated items across all pages.
+    fn rest_paginated(&self, path: &str) -> Result<Vec<Value>, TransportError>;
 }
 
 pub struct GhCliTransport {
@@ -172,5 +176,25 @@ impl GithubTransport for GhCliTransport {
             }
         }
         self.run(&args)
+    }
+
+    fn rest_paginated(&self, path: &str) -> Result<Vec<Value>, TransportError> {
+        // --slurp wraps each page's array in an outer array; flatten.
+        let args = vec![
+            "api".to_string(),
+            "--paginate".to_string(),
+            "--slurp".to_string(),
+            path.to_string(),
+        ];
+        let pages = self.run(&args)?;
+        let Some(pages) = pages.as_array() else {
+            return Err(TransportError::Api(format!(
+                "expected paginated array from {path}, got: {pages}"
+            )));
+        };
+        Ok(pages
+            .iter()
+            .flat_map(|page| page.as_array().cloned().unwrap_or_default())
+            .collect())
     }
 }

@@ -124,6 +124,26 @@ pub struct PullRequest {
     pub url: String,
 }
 
+/// One entry from `GET /pulls/{n}/files`: the file-level change plus the
+/// raw patch text (absent for binary/huge files).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrFile {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub status: FileChangeStatus,
+    pub additions: u64,
+    pub deletions: u64,
+    pub patch: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileChangeStatus {
+    Added,
+    Modified,
+    Removed,
+    Renamed,
+}
+
 /// Which side of the diff a comment anchors to. `Left` = base (deletions),
 /// `Right` = head (additions and context).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

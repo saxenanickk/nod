@@ -4,7 +4,8 @@
 
 use chrono::{DateTime, Utc};
 use github_types::{
-    Actor, CheckState, NodeId, PrNumber, PrState, PrSummary, RepoId, ReviewDecision,
+    Actor, CheckState, FileChangeStatus, NodeId, PrFile, PrNumber, PrState, PrSummary, RepoId,
+    ReviewDecision,
 };
 use serde::Deserialize;
 
@@ -142,6 +143,39 @@ impl From<PrNode> for PrSummary {
             checks,
             updated_at: node.updated_at,
             url: node.url,
+        }
+    }
+}
+
+/// One entry of the REST `GET /pulls/{n}/files` response.
+#[derive(Deserialize)]
+pub struct RestPrFile {
+    pub filename: String,
+    pub previous_filename: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    /// Omitted by GitHub for binary and very large files.
+    pub patch: Option<String>,
+}
+
+impl From<RestPrFile> for PrFile {
+    fn from(f: RestPrFile) -> Self {
+        let status = match f.status.as_str() {
+            "added" | "copied" => FileChangeStatus::Added,
+            "removed" => FileChangeStatus::Removed,
+            "renamed" => FileChangeStatus::Renamed,
+            _ => FileChangeStatus::Modified,
+        };
+        PrFile {
+            path: f.filename,
+            previous_path: f.previous_filename,
+            status,
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch,
         }
     }
 }

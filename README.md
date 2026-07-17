@@ -50,4 +50,3 @@ cargo test         # domain-crate tests
 Workspace rule: only the `prdesk` crate may depend on gpui/gpui-component
 (`cargo tree -i gpui` must show a single crate). Everything below it —
 `github_types`, `github_client`, `diff_kit`, `review_store` — stays UI-free.
-

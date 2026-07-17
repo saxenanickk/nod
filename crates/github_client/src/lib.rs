@@ -7,8 +7,8 @@ mod transport;
 
 pub use transport::{GhCliTransport, GithubTransport, TransportError};
 
-use github_types::PrSummary;
-use parse::{SearchNode, SearchPrsData};
+use github_types::{PrFile, PrNumber, PrSummary, RepoId};
+use parse::{RestPrFile, SearchNode, SearchPrsData};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -85,6 +85,23 @@ impl GithubClient {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .ok_or_else(|| TransportError::Api(format!("unexpected viewer response: {data}")))
+    }
+
+    /// All changed files of a PR, with per-file patches, across all pages.
+    pub fn pr_files(&self, repo: &RepoId, number: PrNumber) -> Result<Vec<PrFile>, TransportError> {
+        let path = format!(
+            "repos/{}/{}/pulls/{}/files?per_page=100",
+            repo.owner, repo.name, number.0
+        );
+        let items = self.transport.rest_paginated(&path)?;
+        items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value::<RestPrFile>(item)
+                    .map(PrFile::from)
+                    .map_err(|e| TransportError::Other(format!("bad files response: {e}")))
+            })
+            .collect()
     }
 
     pub fn search_prs(&self, query: &str, first: u32) -> Result<Vec<PrSummary>, TransportError> {
