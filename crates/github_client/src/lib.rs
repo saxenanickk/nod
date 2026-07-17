@@ -7,12 +7,13 @@ mod transport;
 
 pub use transport::{GhCliTransport, GithubTransport, TransportError};
 
-use github_types::{PrFile, PrNumber, PrSummary, RepoId};
-use parse::{RestPrFile, SearchNode, SearchPrsData};
+use github_types::{PrFile, PrNumber, PrSummary, RepoId, ReviewThread};
+use parse::{RestPrFile, SearchNode, SearchPrsData, ThreadsData};
 use serde_json::json;
 use std::sync::Arc;
 
 const SEARCH_PRS: &str = include_str!("queries/search_prs.graphql");
+const PR_REVIEW_THREADS: &str = include_str!("queries/pr_review_threads.graphql");
 const VIEWER: &str = "query { viewer { login avatarUrl } }";
 
 /// The three PR-list tabs. Each maps to a GitHub search qualifier.
@@ -102,6 +103,41 @@ impl GithubClient {
                     .map_err(|e| TransportError::Other(format!("bad files response: {e}")))
             })
             .collect()
+    }
+
+    /// All review threads of a PR, following reviewThreads pagination.
+    /// Note: comments within a thread are capped at the first 50.
+    pub fn pr_review_threads(
+        &self,
+        repo: &RepoId,
+        number: PrNumber,
+    ) -> Result<Vec<ReviewThread>, TransportError> {
+        let mut threads = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut vars = json!({
+                "owner": repo.owner,
+                "name": repo.name,
+                "number": number.0,
+            });
+            if let Some(c) = &cursor {
+                vars["cursor"] = json!(c);
+            }
+            let data = self.transport.graphql(PR_REVIEW_THREADS, &vars)?;
+            let parsed: ThreadsData = serde_json::from_value(data)
+                .map_err(|e| TransportError::Other(format!("bad threads response: {e}")))?;
+            let connection = parsed.repository.pull_request.review_threads;
+            threads.extend(connection.nodes.into_iter().map(ReviewThread::from));
+            if connection.page_info.has_next_page {
+                cursor = connection.page_info.end_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(threads)
     }
 
     pub fn search_prs(&self, query: &str, first: u32) -> Result<Vec<PrSummary>, TransportError> {

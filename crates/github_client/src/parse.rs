@@ -4,8 +4,8 @@
 
 use chrono::{DateTime, Utc};
 use github_types::{
-    Actor, CheckState, FileChangeStatus, NodeId, PrFile, PrNumber, PrState, PrSummary, RepoId,
-    ReviewDecision,
+    Actor, CheckState, DiffSide, FileChangeStatus, NodeId, PrFile, PrNumber, PrState, PrSummary,
+    RepoId, ReviewComment, ReviewDecision, ReviewThread,
 };
 use serde::Deserialize;
 
@@ -147,6 +147,115 @@ impl From<PrNode> for PrSummary {
     }
 }
 
+// ---- reviewThreads query ----
+
+#[derive(Deserialize)]
+pub struct ThreadsData {
+    pub repository: ThreadsRepo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadsRepo {
+    pub pull_request: ThreadsPr,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadsPr {
+    pub review_threads: ThreadsConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadsConnection {
+    pub page_info: PageInfo,
+    pub nodes: Vec<GqlThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlThread {
+    pub id: String,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    pub path: String,
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    pub original_line: Option<u32>,
+    pub diff_side: Option<String>,
+    pub start_diff_side: Option<String>,
+    pub comments: GqlCommentsConnection,
+}
+
+#[derive(Deserialize)]
+pub struct GqlCommentsConnection {
+    pub nodes: Vec<GqlComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlComment {
+    pub id: String,
+    pub database_id: Option<u64>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    /// PENDING while part of the viewer's unsubmitted review.
+    pub state: Option<String>,
+    #[serde(default)]
+    pub diff_hunk: String,
+    pub author: Option<GqlActor>,
+}
+
+fn parse_side(s: Option<&str>) -> Option<DiffSide> {
+    match s {
+        Some("LEFT") => Some(DiffSide::Left),
+        Some("RIGHT") => Some(DiffSide::Right),
+        _ => None,
+    }
+}
+
+impl From<GqlThread> for ReviewThread {
+    fn from(t: GqlThread) -> Self {
+        ReviewThread {
+            id: NodeId(t.id),
+            path: t.path,
+            is_resolved: t.is_resolved,
+            is_outdated: t.is_outdated,
+            line: t.line,
+            start_line: t.start_line,
+            side: parse_side(t.diff_side.as_deref()).unwrap_or(DiffSide::Right),
+            start_side: parse_side(t.start_diff_side.as_deref()),
+            original_line: t.original_line,
+            comments: t.comments.nodes.into_iter().map(ReviewComment::from).collect(),
+        }
+    }
+}
+
+impl From<GqlComment> for ReviewComment {
+    fn from(c: GqlComment) -> Self {
+        ReviewComment {
+            id: NodeId(c.id),
+            database_id: c.database_id,
+            author: c
+                .author
+                .map(|a| Actor { login: a.login, avatar_url: a.avatar_url })
+                .unwrap_or(Actor { login: "ghost".into(), avatar_url: None }),
+            body_markdown: c.body,
+            created_at: c.created_at,
+            is_pending: c.state.as_deref() == Some("PENDING"),
+            diff_hunk: c.diff_hunk,
+        }
+    }
+}
+
 /// One entry of the REST `GET /pulls/{n}/files` response.
 #[derive(Deserialize)]
 pub struct RestPrFile {
@@ -183,6 +292,33 @@ impl From<RestPrFile> for PrFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_threads_fixture() {
+        // Recorded from zed-industries/zed PR #59596, hand-extended with a
+        // resolved flip and a synthetic live multi-line pending thread.
+        let raw = include_str!("../fixtures/pr_review_threads.json");
+        let data: ThreadsData = serde_json::from_str(raw).expect("fixture parses");
+        let conn = data.repository.pull_request.review_threads;
+        assert!(!conn.page_info.has_next_page);
+        let threads: Vec<ReviewThread> =
+            conn.nodes.into_iter().map(ReviewThread::from).collect();
+        assert_eq!(threads.len(), 4);
+        assert_eq!(threads.iter().filter(|t| t.is_resolved).count(), 1);
+        assert_eq!(threads.iter().filter(|t| t.is_outdated).count(), 3);
+
+        let live = threads.iter().find(|t| !t.is_outdated).expect("live thread");
+        assert_eq!(live.line, Some(42));
+        assert_eq!(live.start_line, Some(40));
+        assert_eq!(live.side, DiffSide::Right);
+        assert_eq!(live.start_side, Some(DiffSide::Right));
+        assert!(live.comments[0].is_pending);
+        assert!(!live.comments[0].author.login.is_empty());
+
+        let outdated = threads.iter().find(|t| t.is_outdated).unwrap();
+        assert!(!outdated.comments.is_empty());
+        assert!(!outdated.comments[0].diff_hunk.is_empty(), "diffHunk recorded");
+    }
 
     #[test]
     fn parses_search_fixture() {

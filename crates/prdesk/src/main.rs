@@ -3,6 +3,7 @@
 mod config;
 mod pr_list;
 mod pr_session;
+mod util;
 mod workspace;
 
 use gpui::{

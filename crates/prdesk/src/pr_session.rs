@@ -1,19 +1,26 @@
-//! One open PR: changed-files sidebar + scrollable unified diff.
+//! One open PR: changed-files sidebar + scrollable unified diff with review
+//! comment threads rendered inline at their anchor lines.
 
+use crate::util::relative_time;
 use diff_kit::{DiffLine, DiffRow, FileDiff, FileStatus, LayoutOptions, layout_unified};
 use github_client::GithubClient;
-use github_types::PrSummary;
+use github_types::{PrSummary, ReviewThread};
 use gpui::{
-    App, Context, FocusHandle, Focusable, ScrollStrategy, SharedString,
-    UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
+    SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    tag::Tag,
 };
+use std::collections::{HashMap, HashSet};
 
 const MONO: &str = "Menlo";
 const ROW_HEIGHT: f32 = 22.0;
+/// Left offset that aligns thread cards with the code column (two gutters +
+/// marker).
+const CODE_INDENT: f32 = 44. + 44. + 20.;
 
 pub enum SessionEvent {
     Close,
@@ -25,53 +32,86 @@ enum SessionLoad {
     Ready,
 }
 
-/// Everything derived off-thread from the files response.
+/// Everything derived off-thread from the files + threads responses.
 struct LoadedDiff {
     files: Vec<FileDiff>,
     /// (additions, deletions) parallel to `files`.
     stats: Vec<(u64, u64)>,
-    rows: Vec<DiffRow>,
-    /// file_ix → index of its `FileHeader` row.
-    header_rows: Vec<usize>,
+    threads: Vec<ReviewThread>,
 }
 
 pub struct PrSessionView {
+    client: GithubClient,
     pr: PrSummary,
     load: SessionLoad,
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
+    threads: Vec<ReviewThread>,
+    /// thread node id → index into `threads`.
+    thread_ix: HashMap<String, usize>,
     rows: Vec<DiffRow>,
+    /// file_ix → index of its `FileHeader` row.
     header_rows: Vec<usize>,
+    show_resolved: bool,
+    /// Resolved threads the user expanded back open.
+    expanded: HashSet<String>,
     selected_file: Option<usize>,
-    diff_scroll: UniformListScrollHandle,
+    list_state: ListState,
+    sidebar_scroll: UniformListScrollHandle,
+    generation: u64,
     pub focus_handle: FocusHandle,
 }
 
 impl PrSessionView {
     pub fn new(client: GithubClient, pr: PrSummary, cx: &mut Context<Self>) -> Self {
-        let this = Self {
-            pr: pr.clone(),
+        let mut this = Self {
+            client,
+            pr,
             load: SessionLoad::Loading,
             files: Vec::new(),
             stats: Vec::new(),
+            threads: Vec::new(),
+            thread_ix: HashMap::new(),
             rows: Vec::new(),
             header_rows: Vec::new(),
+            show_resolved: true,
+            expanded: HashSet::new(),
             selected_file: None,
-            diff_scroll: UniformListScrollHandle::new(),
+            list_state: ListState::new(0, ListAlignment::Top, px(512.)),
+            sidebar_scroll: UniformListScrollHandle::new(),
+            generation: 0,
             focus_handle: cx.focus_handle(),
         };
+        this.refresh(cx);
+        this
+    }
+
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        let client = self.client.clone();
+        let pr = self.pr.clone();
         cx.spawn(async move |view, cx| {
             let loaded = cx
                 .background_spawn(async move { fetch_diff(&client, &pr) })
                 .await;
             view.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 match loaded {
                     Ok(loaded) => {
                         this.files = loaded.files;
                         this.stats = loaded.stats;
-                        this.rows = loaded.rows;
-                        this.header_rows = loaded.header_rows;
+                        this.thread_ix = loaded
+                            .threads
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, t)| (t.id.0.clone(), ix))
+                            .collect();
+                        this.threads = loaded.threads;
                         this.load = SessionLoad::Ready;
+                        this.relayout();
                     }
                     Err(err) => this.load = SessionLoad::Failed(err),
                 }
@@ -80,19 +120,57 @@ impl PrSessionView {
             .ok();
         })
         .detach();
-        this
+        cx.notify();
+    }
+
+    /// Recomputes the row list from stored files/threads and current options.
+    fn relayout(&mut self) {
+        let opts = LayoutOptions {
+            show_resolved: self.show_resolved,
+            show_outdated: true,
+        };
+        self.rows = layout_unified(&self.files, &self.threads, opts);
+        self.header_rows = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(file_ix, _)| {
+                self.rows
+                    .iter()
+                    .position(
+                        |r| matches!(r, DiffRow::FileHeader { file_ix: fx } if *fx == file_ix),
+                    )
+                    .unwrap_or(0)
+            })
+            .collect();
+        self.list_state.reset(self.rows.len());
+    }
+
+    fn toggle_resolved(&mut self, cx: &mut Context<Self>) {
+        self.show_resolved = !self.show_resolved;
+        self.relayout();
+        cx.notify();
     }
 
     fn select_file(&mut self, file_ix: usize, cx: &mut Context<Self>) {
         self.selected_file = Some(file_ix);
         if let Some(&row_ix) = self.header_rows.get(file_ix) {
-            self.diff_scroll.scroll_to_item(row_ix, ScrollStrategy::Top);
+            self.list_state.scroll_to(ListOffset {
+                item_ix: row_ix,
+                offset_in_item: px(0.),
+            });
         }
         cx.notify();
     }
 
+    fn thread(&self, id: &github_types::NodeId) -> Option<&ReviewThread> {
+        self.thread_ix.get(&id.0).and_then(|&ix| self.threads.get(ix))
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let url = self.pr.url.clone();
+        let thread_count = self.threads.len();
+        let unresolved = self.threads.iter().filter(|t| !t.is_resolved).count();
         div()
             .flex()
             .items_center()
@@ -115,16 +193,34 @@ impl PrSessionView {
                     .flex_1()
                     .child(SharedString::from(self.pr.title.clone())),
             )
+            .when(thread_count > 0, |el| {
+                el.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .child(SharedString::from(format!(
+                            "{unresolved}/{thread_count} threads open"
+                        ))),
+                )
+            })
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .child(SharedString::from(format!(
-                        "{} {}",
-                        self.pr.repo.slug(),
-                        self.pr.number
-                    ))),
+                Button::new("toggle-resolved")
+                    .label(if self.show_resolved {
+                        "Hide resolved"
+                    } else {
+                        "Show resolved"
+                    })
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_resolved(cx))),
+            )
+            .child(
+                Button::new("refresh-session")
+                    .label("Refresh")
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
             .child(
                 Button::new("open-browser")
@@ -141,11 +237,15 @@ impl PrSessionView {
         };
         let (adds, dels) = self.stats.get(file_ix).copied().unwrap_or((0, 0));
         let selected = self.selected_file == Some(file_ix);
+        let comment_count = self
+            .threads
+            .iter()
+            .filter(|t| t.path == file.path && !t.is_resolved)
+            .count();
         let status_color = match file.status {
             FileStatus::Added => rgb(0x3fb950),
             FileStatus::Removed => rgb(0xf85149),
-            FileStatus::Renamed => rgb(0xd29922),
-            FileStatus::Modified => rgb(0xd29922),
+            FileStatus::Renamed | FileStatus::Modified => rgb(0xd29922),
         };
         let marker = match file.status {
             FileStatus::Added => "A",
@@ -154,7 +254,6 @@ impl PrSessionView {
             FileStatus::Renamed => "R",
         };
         div()
-            .id(file_ix)
             .flex()
             .items_center()
             .gap_2()
@@ -177,6 +276,14 @@ impl PrSessionView {
                     .truncate()
                     .child(SharedString::from(file.path.clone())),
             )
+            .when(comment_count > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(rgb(0xd29922))
+                        .whitespace_nowrap()
+                        .child(SharedString::from(format!("💬{comment_count}"))),
+                )
+            })
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
@@ -186,7 +293,12 @@ impl PrSessionView {
             .into_any_element()
     }
 
-    fn render_diff_row(&self, ix: usize, cx: &App) -> gpui::AnyElement {
+    fn render_diff_row(
+        &self,
+        ix: usize,
+        entity: &Entity<Self>,
+        cx: &App,
+    ) -> gpui::AnyElement {
         let Some(row) = self.rows.get(ix) else {
             return div().into_any_element();
         };
@@ -223,16 +335,37 @@ impl PrSessionView {
                     .child(SharedString::from(header))
                     .into_any_element()
             }
-            DiffRow::Line { line, .. } => render_diff_line(line, cx),
-            // Threads arrive in M2.
-            DiffRow::Thread { .. }
-            | DiffRow::OutdatedThreadsHeader { .. }
-            | DiffRow::OutdatedThread { .. } => div().h(px(ROW_HEIGHT)).into_any_element(),
+            DiffRow::Line { line, in_comment_range, .. } => {
+                render_diff_line(line, *in_comment_range, cx)
+            }
+            DiffRow::Thread { thread_id } => {
+                let Some(thread) = self.thread(thread_id) else {
+                    return div().into_any_element();
+                };
+                render_thread_card(thread, ix, false, &self.expanded, entity, cx)
+            }
+            DiffRow::OutdatedThreadsHeader { count, .. } => div()
+                .w_full()
+                .px_3()
+                .py_1()
+                .text_sm()
+                .text_color(rgb(0xd29922))
+                .child(SharedString::from(format!(
+                    "⚠ {count} outdated thread{} (code has changed since)",
+                    if *count == 1 { "" } else { "s" }
+                )))
+                .into_any_element(),
+            DiffRow::OutdatedThread { thread_id } => {
+                let Some(thread) = self.thread(thread_id) else {
+                    return div().into_any_element();
+                };
+                render_thread_card(thread, ix, true, &self.expanded, entity, cx)
+            }
         }
     }
 }
 
-fn render_diff_line(line: &DiffLine, cx: &App) -> gpui::AnyElement {
+fn render_diff_line(line: &DiffLine, in_comment_range: bool, cx: &App) -> gpui::AnyElement {
     let (old, new, marker, bg): (Option<u32>, Option<u32>, &str, Option<gpui::Hsla>) = match line {
         DiffLine::Context { old, new, .. } => (Some(*old), Some(*new), " ", None),
         DiffLine::Added { new, .. } => {
@@ -263,6 +396,9 @@ fn render_diff_line(line: &DiffLine, cx: &App) -> gpui::AnyElement {
     if let Some(bg) = bg {
         el = el.bg(bg);
     }
+    if in_comment_range {
+        el = el.border_l_2().border_color(rgb(0xd29922));
+    }
     el.child(gutter(old))
         .child(gutter(new))
         .child(
@@ -284,10 +420,183 @@ fn render_diff_line(line: &DiffLine, cx: &App) -> gpui::AnyElement {
         .into_any_element()
 }
 
+fn render_thread_card(
+    thread: &ReviewThread,
+    row_ix: usize,
+    outdated: bool,
+    expanded: &HashSet<String>,
+    entity: &Entity<PrSessionView>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let collapsed = thread.is_resolved && !expanded.contains(&thread.id.0);
+
+    let mut card = div()
+        .my_1()
+        .border_1()
+        .border_color(cx.theme().border)
+        .rounded_md()
+        .bg(cx.theme().secondary.opacity(0.6))
+        .overflow_hidden();
+
+    if collapsed {
+        let first = thread.comments.first();
+        let summary = format!(
+            "✓ Resolved — {}: {} · {} comment{}",
+            first.map(|c| c.author.login.as_str()).unwrap_or("?"),
+            first
+                .map(|c| c.body_markdown.lines().next().unwrap_or("").to_string())
+                .unwrap_or_default(),
+            thread.comments.len(),
+            if thread.comments.len() == 1 { "" } else { "s" },
+        );
+        let thread_id = thread.id.0.clone();
+        let entity = entity.clone();
+        card = card.child(
+            div()
+                .id(("resolved-toggle", row_ix))
+                .px_2()
+                .py_1()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .truncate()
+                .cursor_pointer()
+                .hover(|el| el.bg(cx.theme().accent))
+                .on_click(move |_, _, cx| {
+                    let thread_id = thread_id.clone();
+                    entity.update(cx, |this, cx| {
+                        this.expanded.insert(thread_id);
+                        cx.notify();
+                    });
+                })
+                .child(SharedString::from(summary)),
+        );
+    } else {
+        let mut badges = div().flex().items_center().gap_1();
+        if thread.is_resolved {
+            badges = badges.child(small_tag("Resolved", rgb(0x3fb950).into()));
+        }
+        if outdated {
+            badges = badges.child(small_tag("Outdated", rgb(0xd29922).into()));
+        }
+        let mut header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .py_1()
+            .child(badges);
+        if thread.is_resolved {
+            let thread_id = thread.id.0.clone();
+            let entity = entity.clone();
+            header = header.child(
+                div()
+                    .id(("resolved-collapse", row_ix))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let thread_id = thread_id.clone();
+                        entity.update(cx, |this, cx| {
+                            this.expanded.remove(&thread_id);
+                            cx.notify();
+                        });
+                    })
+                    .child("collapse"),
+            );
+        }
+        card = card.child(header);
+
+        // Outdated threads carry their original diff excerpt.
+        if outdated {
+            if let Some(hunk) = thread
+                .comments
+                .first()
+                .map(|c| c.diff_hunk.as_str())
+                .filter(|h| !h.is_empty())
+            {
+                let excerpt: Vec<String> = hunk
+                    .lines()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(str::to_string)
+                    .collect();
+                card = card.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .font_family(MONO)
+                        .text_sm()
+                        .bg(cx.theme().background.opacity(0.6))
+                        .text_color(cx.theme().muted_foreground)
+                        .children(
+                            excerpt
+                                .into_iter()
+                                .map(|l| div().whitespace_nowrap().overflow_hidden().child(SharedString::from(l))),
+                        ),
+                );
+            }
+        }
+
+        for comment in &thread.comments {
+            let mut meta = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_sm()
+                        .child(SharedString::from(comment.author.login.clone())),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(relative_time(comment.created_at))),
+                );
+            if comment.is_pending {
+                meta = meta.child(small_tag("Pending", rgb(0xd29922).into()));
+            }
+            card = card.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(cx.theme().border.opacity(0.5))
+                    .child(meta)
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(SharedString::from(comment.body_markdown.clone())),
+                    ),
+            );
+        }
+    }
+
+    div()
+        .w_full()
+        .pl(px(CODE_INDENT))
+        .pr_3()
+        .child(card)
+        .into_any_element()
+}
+
+fn small_tag(label: &'static str, color: gpui::Hsla) -> impl IntoElement {
+    Tag::custom(color.opacity(0.15), color, color.opacity(0.4))
+        .small()
+        .child(SharedString::from(label))
+}
+
 /// Blocking: runs on the background executor.
 fn fetch_diff(client: &GithubClient, pr: &PrSummary) -> Result<LoadedDiff, String> {
     let pr_files = client
         .pr_files(&pr.repo, pr.number)
+        .map_err(|e| e.to_string())?;
+    let threads = client
+        .pr_review_threads(&pr.repo, pr.number)
         .map_err(|e| e.to_string())?;
     let mut files = Vec::with_capacity(pr_files.len());
     let mut stats = Vec::with_capacity(pr_files.len());
@@ -295,17 +604,7 @@ fn fetch_diff(client: &GithubClient, pr: &PrSummary) -> Result<LoadedDiff, Strin
         files.push(diff_kit::file_diff_from_pr_file(f).map_err(|e| format!("{}: {e}", f.path))?);
         stats.push((f.additions, f.deletions));
     }
-    let rows = layout_unified(&files, &[], LayoutOptions::default());
-    let header_rows = files
-        .iter()
-        .enumerate()
-        .map(|(file_ix, _)| {
-            rows.iter()
-                .position(|r| matches!(r, DiffRow::FileHeader { file_ix: fx } if *fx == file_ix))
-                .unwrap_or(0)
-        })
-        .collect();
-    Ok(LoadedDiff { files, stats, rows, header_rows })
+    Ok(LoadedDiff { files, stats, threads })
 }
 
 impl gpui::EventEmitter<SessionEvent> for PrSessionView {}
@@ -338,8 +637,8 @@ impl Render for PrSessionView {
             SessionLoad::Ready => {
                 let entity = cx.entity();
                 let sidebar_entity = entity.clone();
+                let row_entity = entity.clone();
                 let file_count = self.files.len();
-                let row_count = self.rows.len();
                 div()
                     .flex()
                     .flex_1()
@@ -375,17 +674,18 @@ impl Render for PrSessionView {
                                             .collect()
                                     },
                                 )
+                                .track_scroll(self.sidebar_scroll.clone())
                                 .h_full(),
                             ),
                     )
                     .child(
                         div().flex_1().min_w_0().child(
-                            uniform_list("diff-rows", row_count, move |range, _window, cx| {
+                            list(self.list_state.clone(), move |ix, _window, cx| {
+                                let entity = row_entity.clone();
                                 let this = entity.read(cx);
-                                range.map(|ix| this.render_diff_row(ix, cx)).collect()
+                                this.render_diff_row(ix, &row_entity, cx)
                             })
-                            .track_scroll(self.diff_scroll.clone())
-                            .h_full(),
+                            .size_full(),
                         ),
                     )
                     .into_any_element()

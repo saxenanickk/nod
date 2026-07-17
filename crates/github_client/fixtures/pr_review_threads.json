@@ -1,0 +1,182 @@
+{
+  "repository": {
+    "pullRequest": {
+      "reviewThreads": {
+        "nodes": [
+          {
+            "comments": {
+              "nodes": [
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/75036051?u=188c802e8a5e5c0f17760870df5b8a82e01680e8&v=4",
+                    "login": "MrSubidubi"
+                  },
+                  "body": "Do we need the double nesting here, now that this lives within a test file?",
+                  "createdAt": "2026-06-19T12:13:27Z",
+                  "databaseId": 3442387616,
+                  "diffHunk": "@@ -0,0 +1,3915 @@\n+#[cfg(test)]\n+pub mod tests {",
+                  "id": "PRRC_kwDOFExXwM7NLqqg",
+                  "state": "SUBMITTED"
+                },
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/37635083?u=8a36547be4bc128a22dbb860ca1fe3ebd917d14e&v=4",
+                    "login": "NsdHSO"
+                  },
+                  "body": "we don't need it, you're right. I left all the tests in the file without having `mod` anymore",
+                  "createdAt": "2026-06-19T13:50:49Z",
+                  "databaseId": 3442886677,
+                  "diffHunk": "@@ -0,0 +1,3915 @@\n+#[cfg(test)]\n+pub mod tests {",
+                  "id": "PRRC_kwDOFExXwM7NNkgV",
+                  "state": "SUBMITTED"
+                }
+              ]
+            },
+            "diffSide": "RIGHT",
+            "id": "PRRT_kwDOFExXwM6K1AJH",
+            "isOutdated": true,
+            "isResolved": false,
+            "line": null,
+            "originalLine": 2,
+            "path": "crates/editor/src/inlays/inlay_hints_tests.rs",
+            "startDiffSide": null,
+            "startLine": null
+          },
+          {
+            "comments": {
+              "nodes": [
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/75036051?u=188c802e8a5e5c0f17760870df5b8a82e01680e8&v=4",
+                    "login": "MrSubidubi"
+                  },
+                  "body": "Not sure, but could `pub(in ...)` or something else than crate work here? After all, we do not need this anywhere else in the editor crate, do we?",
+                  "createdAt": "2026-06-19T12:14:26Z",
+                  "databaseId": 3442394387,
+                  "diffHunk": "@@ -564,13 +564,24 @@ impl Editor {\n         Some(invalidate_cache)\n     }\n \n-    fn visible_inlay_hints(display_map: &DisplayMap) -> impl Iterator<Item = Inlay> + use<'_> {\n+    pub(crate) fn visible_inlay_hints(",
+                  "id": "PRRC_kwDOFExXwM7NLsUT",
+                  "state": "SUBMITTED"
+                },
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/37635083?u=8a36547be4bc128a22dbb860ca1fe3ebd917d14e&v=4",
+                    "login": "NsdHSO"
+                  },
+                  "body": "@MrSubidubi \r\nyes we have 2 possibilities,\r\n1. pub(super) \r\n2. pub(in crate:inlays)\r\n\r\nwhich we want to go forward? ",
+                  "createdAt": "2026-06-19T13:56:40Z",
+                  "databaseId": 3442917403,
+                  "diffHunk": "@@ -564,13 +564,24 @@ impl Editor {\n         Some(invalidate_cache)\n     }\n \n-    fn visible_inlay_hints(display_map: &DisplayMap) -> impl Iterator<Item = Inlay> + use<'_> {\n+    pub(crate) fn visible_inlay_hints(",
+                  "id": "PRRC_kwDOFExXwM7NNsAb",
+                  "state": "SUBMITTED"
+                },
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/75036051?u=188c802e8a5e5c0f17760870df5b8a82e01680e8&v=4",
+                    "login": "MrSubidubi"
+                  },
+                  "body": "Let's go with `super` then",
+                  "createdAt": "2026-06-19T14:00:57Z",
+                  "databaseId": 3442939126,
+                  "diffHunk": "@@ -564,13 +564,24 @@ impl Editor {\n         Some(invalidate_cache)\n     }\n \n-    fn visible_inlay_hints(display_map: &DisplayMap) -> impl Iterator<Item = Inlay> + use<'_> {\n+    pub(crate) fn visible_inlay_hints(",
+                  "id": "PRRC_kwDOFExXwM7NNxT2",
+                  "state": "SUBMITTED"
+                }
+              ]
+            },
+            "diffSide": "RIGHT",
+            "id": "PRRT_kwDOFExXwM6K1BNz",
+            "isOutdated": true,
+            "isResolved": true,
+            "line": null,
+            "originalLine": 567,
+            "path": "crates/editor/src/inlays/inlay_hints.rs",
+            "startDiffSide": null,
+            "startLine": null
+          },
+          {
+            "comments": {
+              "nodes": [
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/75036051?u=188c802e8a5e5c0f17760870df5b8a82e01680e8&v=4",
+                    "login": "MrSubidubi"
+                  },
+                  "body": "This is also _very_ broad, can we not instead re-export the two methods under a test namespace or something similar? ",
+                  "createdAt": "2026-06-19T12:15:53Z",
+                  "databaseId": 3442404285,
+                  "diffHunk": "@@ -17,6 +17,8 @@\n /// Logic, related to managing LSP inlay hint inlays.\n pub mod inlay_hints;\n \n+pub mod inlay_hints_tests;",
+                  "id": "PRRC_kwDOFExXwM7NLuu9",
+                  "state": "SUBMITTED"
+                },
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/37635083?u=8a36547be4bc128a22dbb860ca1fe3ebd917d14e&v=4",
+                    "login": "NsdHSO"
+                  },
+                  "body": "yes, I think we can make something like\r\n```\r\n#[cfg(test)]\r\nmod A;\r\n\r\n#[cfg(test)]\r\npub(crate) use A::{fn_needed_1, fn_needed_2, fn_needed_n};\r\n```\r\nwhat do you think? is this a good way to go?",
+                  "createdAt": "2026-06-19T14:24:33Z",
+                  "databaseId": 3443067418,
+                  "diffHunk": "@@ -17,6 +17,8 @@\n /// Logic, related to managing LSP inlay hint inlays.\n pub mod inlay_hints;\n \n+pub mod inlay_hints_tests;",
+                  "id": "PRRC_kwDOFExXwM7NOQoa",
+                  "state": "SUBMITTED"
+                }
+              ]
+            },
+            "diffSide": "RIGHT",
+            "id": "PRRT_kwDOFExXwM6K1Cx1",
+            "isOutdated": true,
+            "isResolved": false,
+            "line": null,
+            "originalLine": 20,
+            "path": "crates/editor/src/inlays.rs",
+            "startDiffSide": null,
+            "startLine": null
+          },
+          {
+            "comments": {
+              "nodes": [
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/75036051?u=188c802e8a5e5c0f17760870df5b8a82e01680e8&v=4",
+                    "login": "MrSubidubi"
+                  },
+                  "body": "Do we need the double nesting here, now that this lives within a test file?",
+                  "createdAt": "2026-06-19T12:13:27Z",
+                  "databaseId": 3442387616,
+                  "diffHunk": "@@ -0,0 +1,3915 @@\n+#[cfg(test)]\n+pub mod tests {",
+                  "id": "PRRC_kwDOFExXwM7NLqqg",
+                  "state": "PENDING"
+                },
+                {
+                  "author": {
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/37635083?u=8a36547be4bc128a22dbb860ca1fe3ebd917d14e&v=4",
+                    "login": "NsdHSO"
+                  },
+                  "body": "we don't need it, you're right. I left all the tests in the file without having `mod` anymore",
+                  "createdAt": "2026-06-19T13:50:49Z",
+                  "databaseId": 3442886677,
+                  "diffHunk": "@@ -0,0 +1,3915 @@\n+#[cfg(test)]\n+pub mod tests {",
+                  "id": "PRRC_kwDOFExXwM7NNkgV",
+                  "state": "SUBMITTED"
+                }
+              ]
+            },
+            "diffSide": "RIGHT",
+            "id": "PRRT_synthetic_live",
+            "isOutdated": false,
+            "isResolved": false,
+            "line": 42,
+            "originalLine": 2,
+            "path": "crates/example/src/live.rs",
+            "startDiffSide": "RIGHT",
+            "startLine": 40
+          }
+        ],
+        "pageInfo": {
+          "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wNi0xOVQxMjoxNTo1M1rOitQsdQ==",
+          "hasNextPage": false
+        }
+      }
+    }
+  }
+}
