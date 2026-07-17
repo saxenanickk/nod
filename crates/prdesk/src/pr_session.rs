@@ -1,10 +1,12 @@
 //! One open PR: changed-files sidebar + scrollable unified diff with review
 //! comment threads rendered inline at their anchor lines.
 
+use crate::config::{self, Config};
 use crate::util::relative_time;
 use diff_kit::{DiffLine, DiffRow, FileDiff, FileStatus, LayoutOptions, layout_unified};
 use github_client::GithubClient;
 use github_types::{PrSummary, ReviewThread};
+use std::path::PathBuf;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
     SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
@@ -30,6 +32,22 @@ enum SessionLoad {
     Loading,
     Failed(String),
     Ready,
+}
+
+#[derive(Clone)]
+enum CheckoutState {
+    Resolving,
+    NoClone,
+    Ready {
+        path: PathBuf,
+        branch: String,
+        dirty: bool,
+        /// Local HEAD equals the PR's head sha — line-precise Zed jumps are
+        /// safe.
+        on_pr: bool,
+    },
+    CheckingOut,
+    Failed(String),
 }
 
 /// Everything derived off-thread from the files + threads responses.
@@ -58,14 +76,24 @@ pub struct PrSessionView {
     selected_file: Option<usize>,
     list_state: ListState,
     sidebar_scroll: UniformListScrollHandle,
+    checkout: CheckoutState,
+    clone_hint: Option<PathBuf>,
+    clone_roots: Vec<PathBuf>,
     generation: u64,
     pub focus_handle: FocusHandle,
 }
 
 impl PrSessionView {
-    pub fn new(client: GithubClient, pr: PrSummary, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: GithubClient,
+        pr: PrSummary,
+        config: &Config,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             client,
+            clone_hint: config.clones.get(&pr.repo.slug()).cloned(),
+            clone_roots: config.clone_roots.clone(),
             pr,
             load: SessionLoad::Loading,
             files: Vec::new(),
@@ -79,11 +107,98 @@ impl PrSessionView {
             selected_file: None,
             list_state: ListState::new(0, ListAlignment::Top, px(512.)),
             sidebar_scroll: UniformListScrollHandle::new(),
+            checkout: CheckoutState::Resolving,
             generation: 0,
             focus_handle: cx.focus_handle(),
         };
         this.refresh(cx);
+        this.resolve_clone(cx);
         this
+    }
+
+    /// Finds the local clone (config hint, else filesystem scan) and reads
+    /// its git state.
+    fn resolve_clone(&mut self, cx: &mut Context<Self>) {
+        let repo = self.pr.repo.clone();
+        let head_sha = self.pr.head_sha.clone();
+        let hint = self.clone_hint.clone();
+        let roots = self.clone_roots.clone();
+        cx.spawn(async move |view, cx| {
+            let state = cx
+                .background_spawn(async move {
+                    let path = hint
+                        .filter(|p| p.join(".git").exists())
+                        .or_else(|| repo_local::find_clone(&roots, &repo, 3));
+                    let Some(path) = path else {
+                        return CheckoutState::NoClone;
+                    };
+                    config::record_clone(&repo.slug(), &path);
+                    match (
+                        repo_local::current_branch(&path),
+                        repo_local::working_tree_dirty(&path),
+                        repo_local::head_sha(&path),
+                    ) {
+                        (Ok(branch), Ok(dirty), Ok(sha)) => CheckoutState::Ready {
+                            path,
+                            branch,
+                            dirty,
+                            on_pr: !head_sha.is_empty() && sha == head_sha,
+                        },
+                        (b, d, s) => CheckoutState::Failed(
+                            [b.err(), d.err(), s.err()]
+                                .into_iter()
+                                .flatten()
+                                .map(|e| e.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                        ),
+                    }
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                this.checkout = state;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn do_checkout(&mut self, cx: &mut Context<Self>) {
+        let CheckoutState::Ready { path, dirty, .. } = self.checkout.clone() else {
+            return;
+        };
+        self.checkout = CheckoutState::CheckingOut;
+        cx.notify();
+        let repo = self.pr.repo.clone();
+        let number = self.pr.number.0;
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if dirty {
+                        repo_local::stash_all(&path, &format!("prdesk: before PR #{number}"))?;
+                    }
+                    repo_local::checkout_pr(&path, &repo, number)
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.resolve_clone(cx),
+                    Err(err) => this.checkout = CheckoutState::Failed(format!("{err:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The clone path, when line-precise "open in Zed" is safe.
+    fn zed_target(&self) -> Option<(PathBuf, bool)> {
+        match &self.checkout {
+            CheckoutState::Ready { path, on_pr, .. } => Some((path.clone(), *on_pr)),
+            _ => None,
+        }
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -231,6 +346,111 @@ impl PrSessionView {
             )
     }
 
+    fn render_checkout_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .text_sm()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.4));
+        match &self.checkout {
+            CheckoutState::Resolving => {
+                bar = bar.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Locating local clone…"),
+                );
+            }
+            CheckoutState::NoClone => {
+                bar = bar.child(div().text_color(cx.theme().muted_foreground).child(
+                    SharedString::from(format!(
+                        "No local clone of {} found — add it to config.json → clones",
+                        self.pr.repo.slug()
+                    )),
+                ));
+            }
+            CheckoutState::CheckingOut => {
+                bar = bar.child(
+                    div()
+                        .text_color(rgb(0xd29922))
+                        .child("Checking out PR branch…"),
+                );
+            }
+            CheckoutState::Failed(err) => {
+                bar = bar
+                    .child(
+                        div()
+                            .text_color(rgb(0xf85149))
+                            .truncate()
+                            .flex_1()
+                            .child(SharedString::from(format!("Checkout failed: {err}"))),
+                    )
+                    .child(
+                        Button::new("retry-clone")
+                            .label("Retry")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, _, cx| this.resolve_clone(cx))),
+                    );
+            }
+            CheckoutState::Ready { path, branch, dirty, on_pr } => {
+                bar = bar.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .font_family(MONO)
+                        .truncate()
+                        .child(SharedString::from(format!(
+                            "{} · {branch}",
+                            path.display()
+                        ))),
+                );
+                if *on_pr {
+                    bar = bar
+                        .child(
+                            div()
+                                .text_color(rgb(0x3fb950))
+                                .whitespace_nowrap()
+                                .child("✓ on PR head — ⌘-click any line to open in Zed"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("open-repo-zed")
+                                .label("Open repo in Zed")
+                                .ghost()
+                                .xsmall()
+                                .on_click({
+                                    let path = path.clone();
+                                    move |_, _, _| {
+                                        let _ = zed_bridge::open_in_zed(&path, None);
+                                    }
+                                }),
+                        );
+                } else {
+                    if *dirty {
+                        bar = bar.child(
+                            div()
+                                .text_color(rgb(0xd29922))
+                                .whitespace_nowrap()
+                                .child("working tree has changes"),
+                        );
+                    }
+                    bar = bar.child(div().flex_1()).child(
+                        Button::new("checkout")
+                            .label(if *dirty { "Stash & checkout PR" } else { "Checkout PR" })
+                            .primary()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, _, cx| this.do_checkout(cx))),
+                    );
+                }
+            }
+        }
+        bar
+    }
+
     fn render_sidebar_row(&self, file_ix: usize, cx: &App) -> gpui::AnyElement {
         let Some(file) = self.files.get(file_ix) else {
             return div().into_any_element();
@@ -313,12 +533,31 @@ impl PrSessionView {
                     (None, true) => format!("{} (no preview: binary or too large)", file.path),
                     (None, false) => file.path.clone(),
                 };
-                base.bg(cx.theme().secondary)
+                let mut header = base
+                    .bg(cx.theme().secondary)
                     .px_3()
                     .gap_2()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child(SharedString::from(label))
-                    .into_any_element()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(label)),
+                    );
+                if let Some((clone_path, _)) = self.zed_target() {
+                    let file_path = clone_path.join(&file.path);
+                    header = header.child(
+                        Button::new(("open-zed", ix))
+                            .label("Open in Zed")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, _| {
+                                let _ = zed_bridge::open_in_zed(&file_path, None);
+                            }),
+                    );
+                }
+                header.into_any_element()
             }
             DiffRow::HunkHeader { file_ix, hunk_ix } => {
                 let header = self
@@ -335,8 +574,21 @@ impl PrSessionView {
                     .child(SharedString::from(header))
                     .into_any_element()
             }
-            DiffRow::Line { line, in_comment_range, .. } => {
-                render_diff_line(line, *in_comment_range, cx)
+            DiffRow::Line { line, in_comment_range, file_ix } => {
+                // ⌘-click opens the line in Zed once the clone sits on the
+                // PR head (line numbers are only trustworthy then).
+                let zed = self.zed_target().and_then(|(clone, on_pr)| {
+                    if !on_pr {
+                        return None;
+                    }
+                    let file = self.files.get(*file_ix)?;
+                    let line_no = match line {
+                        DiffLine::Context { new, .. } | DiffLine::Added { new, .. } => Some(*new),
+                        DiffLine::Removed { .. } => None,
+                    };
+                    Some((clone.join(&file.path), line_no))
+                });
+                render_diff_line(line, *in_comment_range, ix, zed, cx)
             }
             DiffRow::Thread { thread_id } => {
                 let Some(thread) = self.thread(thread_id) else {
@@ -365,7 +617,13 @@ impl PrSessionView {
     }
 }
 
-fn render_diff_line(line: &DiffLine, in_comment_range: bool, cx: &App) -> gpui::AnyElement {
+fn render_diff_line(
+    line: &DiffLine,
+    in_comment_range: bool,
+    row_ix: usize,
+    zed: Option<(PathBuf, Option<u32>)>,
+    cx: &App,
+) -> gpui::AnyElement {
     let (old, new, marker, bg): (Option<u32>, Option<u32>, &str, Option<gpui::Hsla>) = match line {
         DiffLine::Context { old, new, .. } => (Some(*old), Some(*new), " ", None),
         DiffLine::Added { new, .. } => {
@@ -387,6 +645,7 @@ fn render_diff_line(line: &DiffLine, in_comment_range: bool, cx: &App) -> gpui::
             ))
     };
     let mut el = div()
+        .id(("line", row_ix))
         .h(px(ROW_HEIGHT))
         .w_full()
         .flex()
@@ -398,6 +657,13 @@ fn render_diff_line(line: &DiffLine, in_comment_range: bool, cx: &App) -> gpui::
     }
     if in_comment_range {
         el = el.border_l_2().border_color(rgb(0xd29922));
+    }
+    if let Some((path, line_no)) = zed {
+        el = el.on_click(move |event: &gpui::ClickEvent, _, _| {
+            if event.modifiers().platform {
+                let _ = zed_bridge::open_in_zed(&path, line_no);
+            }
+        });
     }
     el.child(gutter(old))
         .child(gutter(new))
@@ -699,6 +965,7 @@ impl Render for PrSessionView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_header(cx))
+            .child(self.render_checkout_bar(cx))
             .child(body)
     }
 }

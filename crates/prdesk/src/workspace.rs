@@ -11,6 +11,7 @@ use gpui::{
 
 pub struct Workspace {
     client: GithubClient,
+    config: Config,
     pr_list: Entity<PrListView>,
     session: Option<Entity<PrSessionView>>,
     _list_subscription: Subscription,
@@ -24,13 +25,14 @@ impl Workspace {
             Some(user) => GithubClient::gh_cli_as(user.clone()),
             None => GithubClient::gh_cli(),
         };
-        let pr_list = cx.new(|cx| PrListView::new(client.clone(), config, cx));
+        let pr_list = cx.new(|cx| PrListView::new(client.clone(), config.clone(), cx));
         let list_subscription =
             cx.subscribe(&pr_list, |this, _, event: &PrListEvent, cx| match event {
                 PrListEvent::OpenPr(pr) => this.open_session(pr.clone(), cx),
             });
         Self {
             client,
+            config,
             pr_list,
             session: None,
             _list_subscription: list_subscription,
@@ -41,7 +43,8 @@ impl Workspace {
 
     fn open_session(&mut self, pr: PrSummary, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let session = cx.new(|cx| PrSessionView::new(client, pr, cx));
+        let config = self.config.clone();
+        let session = cx.new(|cx| PrSessionView::new(client, pr, &config, cx));
         self._session_subscription = Some(cx.subscribe(
             &session,
             |this, _, event: &SessionEvent, cx| match event {

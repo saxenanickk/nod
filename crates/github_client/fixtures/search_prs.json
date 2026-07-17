@@ -16,13 +16,23 @@
         },
         "repository": {
           "name": "octo-app",
-          "owner": { "login": "octo-org" }
+          "owner": {
+            "login": "octo-org"
+          }
         },
         "commits": {
           "nodes": [
-            { "commit": { "statusCheckRollup": { "state": "FAILURE" } } }
+            {
+              "commit": {
+                "statusCheckRollup": {
+                  "state": "FAILURE"
+                }
+              }
+            }
           ]
-        }
+        },
+        "headRefName": "integration/example-branch",
+        "headRefOid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
       },
       {
         "id": "PR_kwDOAbc456",
@@ -36,11 +46,17 @@
         "author": null,
         "repository": {
           "name": "octo-app",
-          "owner": { "login": "octo-org" }
+          "owner": {
+            "login": "octo-org"
+          }
         },
         "commits": {
           "nodes": [
-            { "commit": { "statusCheckRollup": null } }
+            {
+              "commit": {
+                "statusCheckRollup": null
+              }
+            }
           ]
         }
       }

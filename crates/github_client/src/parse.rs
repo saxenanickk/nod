@@ -39,6 +39,10 @@ pub struct PrNode {
     pub state: String,
     pub updated_at: DateTime<Utc>,
     pub review_decision: Option<String>,
+    #[serde(default)]
+    pub head_ref_name: String,
+    #[serde(default)]
+    pub head_ref_oid: String,
     pub author: Option<GqlActor>,
     pub repository: GqlRepo,
     pub commits: CommitsConnection,
@@ -141,6 +145,8 @@ impl From<PrNode> for PrSummary {
             state: parse_pr_state(&node.state),
             review_decision: node.review_decision.as_deref().and_then(parse_review_decision),
             checks,
+            head_ref: node.head_ref_name,
+            head_sha: node.head_ref_oid,
             updated_at: node.updated_at,
             url: node.url,
         }

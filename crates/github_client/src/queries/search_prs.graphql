@@ -10,6 +10,8 @@ query SearchPrs($q: String!, $first: Int!) {
         state
         updatedAt
         reviewDecision
+        headRefName
+        headRefOid
         author {
           login
           avatarUrl

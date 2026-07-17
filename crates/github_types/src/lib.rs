@@ -98,6 +98,8 @@ pub struct PrSummary {
     pub state: PrState,
     pub review_decision: Option<ReviewDecision>,
     pub checks: Option<CheckState>,
+    pub head_ref: String,
+    pub head_sha: String,
     pub updated_at: DateTime<Utc>,
     pub url: String,
 }

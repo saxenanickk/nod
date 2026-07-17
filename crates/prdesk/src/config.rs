@@ -15,6 +15,8 @@ pub struct Config {
     pub scope: String,
     /// `owner/repo` → local clone path. Used for checkout from M3.
     pub clones: HashMap<String, PathBuf>,
+    /// Directories scanned (3 levels deep) to auto-discover clones.
+    pub clone_roots: Vec<PathBuf>,
     /// Poll interval for the PR list, in seconds.
     pub poll_seconds: u64,
 }
@@ -25,6 +27,7 @@ impl Default for Config {
             gh_user: Some("saxenanickk".to_string()),
             scope: String::new(),
             clones: HashMap::new(),
+            clone_roots: std::env::home_dir().into_iter().collect(),
             poll_seconds: 60,
         }
     }
@@ -33,6 +36,17 @@ impl Default for Config {
 pub fn config_path() -> Option<PathBuf> {
     let home = std::env::home_dir()?;
     Some(home.join("Library/Application Support/prdesk/config.json"))
+}
+
+/// Remembers a discovered clone path (load-modify-save, so concurrent
+/// sessions can't clobber unrelated edits wholesale).
+pub fn record_clone(slug: &str, path: &std::path::Path) {
+    let Some(config_file) = config_path() else { return };
+    let mut config = load_or_init();
+    config.clones.insert(slug.to_string(), path.to_path_buf());
+    if let Ok(raw) = serde_json::to_string_pretty(&config) {
+        let _ = std::fs::write(&config_file, raw);
+    }
 }
 
 /// Loads the config, writing the default on first run so users have a file
