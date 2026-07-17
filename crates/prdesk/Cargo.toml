@@ -18,3 +18,12 @@ zed_bridge = { workspace = true }
 gpui = "0.2"
 gpui-component = "0.5"
 gpui-component-assets = "0.5"
+
+# `cargo bundle --release` (needs `cargo install cargo-bundle`) packages a
+# macOS .app from this metadata.
+[package.metadata.bundle]
+name = "prdesk"
+identifier = "dev.saxenanickk.prdesk"
+short_description = "GitHub PR review companion for Zed"
+category = "public.app-category.developer-tools"
+osx_minimum_system_version = "11.0"

@@ -32,6 +32,14 @@ pub enum SessionEvent {
     Close,
 }
 
+gpui::actions!(
+    pr_session,
+    [NextFile, PrevFile, NextThread, PrevThread, RefreshSession, DismissOverlay]
+);
+
+/// The key context the session's bindings are scoped to (see main.rs).
+pub const SESSION_KEY_CONTEXT: &str = "PrSession";
+
 enum SessionLoad {
     Loading,
     Failed(String),
@@ -120,6 +128,8 @@ pub struct PrSessionView {
     review_state: Option<PrReviewState>,
     review_drawer: Option<ReviewDrawer>,
     merging: bool,
+    /// Cursor into thread rows for n/p navigation.
+    thread_nav: usize,
     generation: u64,
     pub focus_handle: FocusHandle,
 }
@@ -154,6 +164,7 @@ impl PrSessionView {
             review_state: None,
             review_drawer: None,
             merging: false,
+            thread_nav: 0,
             generation: 0,
             focus_handle: cx.focus_handle(),
         };
@@ -327,6 +338,55 @@ impl PrSessionView {
 
     fn thread(&self, id: &NodeId) -> Option<&ReviewThread> {
         self.thread_ix.get(&id.0).and_then(|&ix| self.threads.get(ix))
+    }
+
+    // ---- keyboard navigation ----
+
+    fn scroll_to_row(&mut self, row_ix: usize) {
+        self.list_state.scroll_to(ListOffset {
+            item_ix: row_ix,
+            offset_in_item: px(0.),
+        });
+    }
+
+    fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.files.is_empty() {
+            return;
+        }
+        let current = self.selected_file.unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(self.files.len() as isize) as usize;
+        self.select_file(next, cx);
+    }
+
+    fn step_thread(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let thread_rows: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                matches!(r, DiffRow::Thread { .. } | DiffRow::OutdatedThread { .. })
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        if thread_rows.is_empty() {
+            return;
+        }
+        let cursor = (self.thread_nav as isize + delta).rem_euclid(thread_rows.len() as isize)
+            as usize;
+        self.thread_nav = cursor;
+        self.scroll_to_row(thread_rows[cursor]);
+        cx.notify();
+    }
+
+    /// Closes whichever bottom overlay is open (composer or review drawer);
+    /// returns whether anything was dismissed.
+    fn dismiss_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.review_drawer.take().is_some() || self.composer.take().is_some() {
+            cx.notify();
+            true
+        } else {
+            false
+        }
     }
 
     // ---- writes: resolve/unresolve and the comment composer ----
@@ -1613,6 +1673,17 @@ impl Render for PrSessionView {
         };
         let mut root = div()
             .track_focus(&self.focus_handle)
+            .key_context(SESSION_KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &NextFile, _, cx| this.step_file(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevFile, _, cx| this.step_file(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextThread, _, cx| this.step_thread(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevThread, _, cx| this.step_thread(-1, cx)))
+            .on_action(cx.listener(|this, _: &RefreshSession, _, cx| this.refresh(cx)))
+            .on_action(cx.listener(|this, _: &DismissOverlay, _, cx| {
+                if !this.dismiss_overlay(cx) {
+                    cx.emit(SessionEvent::Close);
+                }
+            }))
             .flex()
             .flex_col()
             .size_full()

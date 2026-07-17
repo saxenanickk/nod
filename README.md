@@ -40,6 +40,18 @@ crates, so the core could one day move into Zed itself.
 - `scope` — extra search qualifier for the PR list (`org:…` / `repo:…`);
   empty searches all of GitHub.
 
+## Keyboard shortcuts
+
+In an open PR:
+
+| Key | Action |
+|-----|--------|
+| `]` / `[` | Next / previous file |
+| `n` / `p` | Next / previous comment thread |
+| `r` | Refresh |
+| `esc` | Close the composer/review drawer, else go back |
+| `cmd-q` | Quit |
+
 ## Development
 
 ```sh
@@ -50,3 +62,10 @@ cargo test         # domain-crate tests
 Workspace rule: only the `prdesk` crate may depend on gpui/gpui-component
 (`cargo tree -i gpui` must show a single crate). Everything below it —
 `github_types`, `github_client`, `diff_kit`, `review_store` — stays UI-free.
+
+### Packaging a macOS `.app`
+
+```sh
+cargo install cargo-bundle
+cargo bundle --release --package prdesk
+```

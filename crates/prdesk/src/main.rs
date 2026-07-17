@@ -11,6 +11,10 @@ use gpui::{
     prelude::*, px, size,
 };
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
+use pr_session::{
+    DismissOverlay, NextFile, NextThread, PrevFile, PrevThread, RefreshSession,
+    SESSION_KEY_CONTEXT,
+};
 use workspace::Workspace;
 
 actions!(prdesk, [Quit]);
@@ -24,7 +28,17 @@ fn main() {
             gpui_component::init(cx);
             Theme::change(ThemeMode::Dark, None, cx);
 
-            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", Quit, None),
+                // Session navigation, scoped so typing in a composer isn't
+                // hijacked (the Input's own context takes precedence there).
+                KeyBinding::new("]", NextFile, Some(SESSION_KEY_CONTEXT)),
+                KeyBinding::new("[", PrevFile, Some(SESSION_KEY_CONTEXT)),
+                KeyBinding::new("n", NextThread, Some(SESSION_KEY_CONTEXT)),
+                KeyBinding::new("p", PrevThread, Some(SESSION_KEY_CONTEXT)),
+                KeyBinding::new("r", RefreshSession, Some(SESSION_KEY_CONTEXT)),
+                KeyBinding::new("escape", DismissOverlay, Some(SESSION_KEY_CONTEXT)),
+            ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
