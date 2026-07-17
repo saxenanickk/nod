@@ -54,3 +54,27 @@ impl DiffLine {
         }
     }
 }
+
+/// Converts a REST files-endpoint entry into a parsed, renderable diff.
+pub fn file_diff_from_pr_file(
+    file: &github_types::PrFile,
+) -> Result<FileDiff, PatchParseError> {
+    use github_types::FileChangeStatus;
+    let status = match file.status {
+        FileChangeStatus::Added => FileStatus::Added,
+        FileChangeStatus::Modified => FileStatus::Modified,
+        FileChangeStatus::Removed => FileStatus::Removed,
+        FileChangeStatus::Renamed => FileStatus::Renamed,
+    };
+    let hunks = match &file.patch {
+        Some(patch) => parse_patch(patch)?,
+        None => Vec::new(),
+    };
+    Ok(FileDiff {
+        path: file.path.clone(),
+        old_path: file.previous_path.clone(),
+        status,
+        is_binary_or_too_large: file.patch.is_none(),
+        hunks,
+    })
+}

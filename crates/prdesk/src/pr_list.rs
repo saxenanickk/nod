@@ -21,6 +21,12 @@ pub enum LoadState {
     Failed(String),
 }
 
+pub enum PrListEvent {
+    OpenPr(PrSummary),
+}
+
+impl gpui::EventEmitter<PrListEvent> for PrListView {}
+
 /// Auth preflight status for the configured account.
 enum AuthState {
     Checking,
@@ -41,11 +47,7 @@ pub struct PrListView {
 }
 
 impl PrListView {
-    pub fn new(config: Config, cx: &mut Context<Self>) -> Self {
-        let client = match &config.gh_user {
-            Some(user) => GithubClient::gh_cli_as(user.clone()),
-            None => GithubClient::gh_cli(),
-        };
+    pub fn new(client: GithubClient, config: Config, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             client,
             config,
@@ -180,7 +182,7 @@ impl PrListView {
     }
 
     fn render_row(&self, ix: usize, pr: &PrSummary, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let url = pr.url.clone();
+        let open_pr = pr.clone();
         let subtitle = format!(
             "{} {} · {} · {}",
             pr.repo.slug(),
@@ -220,8 +222,9 @@ impl PrListView {
             .border_color(cx.theme().border)
             .hover(|s| s.bg(cx.theme().accent))
             .cursor_pointer()
-            // M1 replaces this with opening an in-app review session.
-            .on_click(move |_, _, cx| cx.open_url(&url))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(PrListEvent::OpenPr(open_pr.clone()));
+            }))
             .child(
                 div()
                     .flex_1()

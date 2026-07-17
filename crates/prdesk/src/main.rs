@@ -2,13 +2,15 @@
 
 mod config;
 mod pr_list;
+mod pr_session;
+mod workspace;
 
 use gpui::{
     App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions,
     prelude::*, px, size,
 };
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
-use pr_list::PrListView;
+use workspace::Workspace;
 
 actions!(prdesk, [Quit]);
 
@@ -41,7 +43,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| PrListView::new(config, cx));
+                    let view = cx.new(|cx| Workspace::new(config, cx));
                     window.focus(&view.read(cx).focus_handle);
                     cx.new(|cx| Root::new(view, window, cx))
                 },
