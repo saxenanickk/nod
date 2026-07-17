@@ -1,0 +1,53 @@
+# prdesk
+
+A fast, native GitHub pull-request review app for people who edit in [Zed](https://zed.dev).
+
+Zed's extension API has no UI extension points, so a VS Code-style PR review
+experience can't live inside Zed today. prdesk is the next best thing: a
+standalone [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)
+app you keep next to Zed —
+
+- see the PRs waiting on you, check one out locally with one click,
+- read the diff with review comment threads inline,
+- comment, reply, resolve, approve/request changes, merge,
+- and jump from any diff line straight into Zed (`zed file:line`) with full
+  LSP.
+
+Built in GPUI (the same Rust UI framework Zed uses) with UI-free domain
+crates, so the core could one day move into Zed itself.
+
+## Requirements
+
+- macOS
+- [`gh`](https://cli.github.com) installed and authenticated (`gh auth login`)
+- the `zed` CLI (Zed → install CLI) for jump-to-editor
+
+## Configuration
+
+`~/Library/Application Support/prdesk/config.json` (created on first run):
+
+```json
+{
+  "gh_user": "saxenanickk",
+  "scope": "org:your-org",
+  "clones": { "owner/repo": "/path/to/local/clone" },
+  "poll_seconds": 60
+}
+```
+
+- `gh_user` — which gh account to act as (gh supports multiple); `null` uses
+  gh's active account.
+- `scope` — extra search qualifier for the PR list (`org:…` / `repo:…`);
+  empty searches all of GitHub.
+
+## Development
+
+```sh
+cargo run          # the app
+cargo test         # domain-crate tests
+```
+
+Workspace rule: only the `prdesk` crate may depend on gpui/gpui-component
+(`cargo tree -i gpui` must show a single crate). Everything below it —
+`github_types`, `github_client`, `diff_kit`, `review_store` — stays UI-free.
+

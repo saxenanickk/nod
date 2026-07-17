@@ -1,0 +1,13 @@
+[package]
+name = "github_client"
+version = "0.1.0"
+edition = "2024"
+description = "GitHub REST/GraphQL calls over a pluggable transport (v1: gh CLI)."
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+github_types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

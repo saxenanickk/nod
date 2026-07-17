@@ -1,0 +1,9 @@
+[package]
+name = "github_types"
+version = "0.1.0"
+edition = "2024"
+description = "Pure GitHub PR/review domain models. No I/O, no UI."
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }

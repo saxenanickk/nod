@@ -1,0 +1,9 @@
+[package]
+name = "repo_local"
+version = "0.1.0"
+edition = "2024"
+description = "Local clone discovery and PR checkout via gh/git."
+
+[dependencies]
+anyhow = { workspace = true }
+github_types = { workspace = true }

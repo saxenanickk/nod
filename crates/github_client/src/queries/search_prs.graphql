@@ -1,0 +1,35 @@
+query SearchPrs($q: String!, $first: Int!) {
+  search(query: $q, type: ISSUE, first: $first) {
+    nodes {
+      ... on PullRequest {
+        id
+        number
+        title
+        url
+        isDraft
+        state
+        updatedAt
+        reviewDecision
+        author {
+          login
+          avatarUrl
+        }
+        repository {
+          name
+          owner {
+            login
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

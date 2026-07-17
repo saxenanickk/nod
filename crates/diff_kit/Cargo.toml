@@ -1,0 +1,9 @@
+[package]
+name = "diff_kit"
+version = "0.1.0"
+edition = "2024"
+description = "Patch parsing, diff row layout, and review-comment anchor mapping."
+
+[dependencies]
+github_types = { workspace = true }
+thiserror = { workspace = true }

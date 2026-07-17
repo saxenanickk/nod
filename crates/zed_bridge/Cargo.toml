@@ -1,0 +1,8 @@
+[package]
+name = "zed_bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Open files at lines in Zed via the zed CLI."
+
+[dependencies]
+anyhow = { workspace = true }

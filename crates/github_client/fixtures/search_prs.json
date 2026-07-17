@@ -1,0 +1,49 @@
+{
+  "search": {
+    "nodes": [
+      {
+        "id": "PR_kwDOAbc123",
+        "number": 1938,
+        "title": "feat(connectivity): single-source connectivity state",
+        "url": "https://github.com/octo-org/octo-app/pull/1938",
+        "isDraft": false,
+        "state": "OPEN",
+        "updatedAt": "2026-07-16T10:22:31Z",
+        "reviewDecision": "CHANGES_REQUESTED",
+        "author": {
+          "login": "octocat",
+          "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        "repository": {
+          "name": "octo-app",
+          "owner": { "login": "octo-org" }
+        },
+        "commits": {
+          "nodes": [
+            { "commit": { "statusCheckRollup": { "state": "FAILURE" } } }
+          ]
+        }
+      },
+      {
+        "id": "PR_kwDOAbc456",
+        "number": 42,
+        "title": "chore: bump deps",
+        "url": "https://github.com/octo-org/octo-app/pull/42",
+        "isDraft": true,
+        "state": "OPEN",
+        "updatedAt": "2026-07-10T08:00:00Z",
+        "reviewDecision": null,
+        "author": null,
+        "repository": {
+          "name": "octo-app",
+          "owner": { "login": "octo-org" }
+        },
+        "commits": {
+          "nodes": [
+            { "commit": { "statusCheckRollup": null } }
+          ]
+        }
+      }
+    ]
+  }
+}

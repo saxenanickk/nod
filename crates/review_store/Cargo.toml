@@ -1,0 +1,11 @@
+[package]
+name = "review_store"
+version = "0.1.0"
+edition = "2024"
+description = "PR session state, pending-review lifecycle, optimistic writes. Executor-agnostic."
+
+[dependencies]
+anyhow = { workspace = true }
+github_client = { workspace = true }
+github_types = { workspace = true }
+diff_kit = { workspace = true }

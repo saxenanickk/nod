@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/github_types",
+    "crates/github_client",
+    "crates/diff_kit",
+    "crates/repo_local",
+    "crates/review_store",
+    "crates/zed_bridge",
+    "crates/prdesk",
+]
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+github_types = { path = "crates/github_types" }
+github_client = { path = "crates/github_client" }
+diff_kit = { path = "crates/diff_kit" }
+repo_local = { path = "crates/repo_local" }
+review_store = { path = "crates/review_store" }
+zed_bridge = { path = "crates/zed_bridge" }
+
+[profile.dev]
+# Keep our own crates debuggable but optimize deps: gpui is unusably slow at opt-level 0.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2
