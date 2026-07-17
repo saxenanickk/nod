@@ -7,14 +7,27 @@ mod transport;
 
 pub use transport::{GhCliTransport, GithubTransport, TransportError};
 
-use github_types::{PrFile, PrNumber, PrSummary, RepoId, ReviewThread};
+use github_types::{
+    CommentAnchor, DiffSide, NodeId, PrFile, PrNumber, PrSummary, RepoId, ReviewThread,
+};
 use parse::{RestPrFile, SearchNode, SearchPrsData, ThreadsData};
 use serde_json::json;
 use std::sync::Arc;
 
 const SEARCH_PRS: &str = include_str!("queries/search_prs.graphql");
 const PR_REVIEW_THREADS: &str = include_str!("queries/pr_review_threads.graphql");
+const ADD_LINE_COMMENT: &str = include_str!("queries/add_line_comment.graphql");
+const REPLY_TO_THREAD: &str = include_str!("queries/reply_to_thread.graphql");
+const RESOLVE_THREAD: &str = include_str!("queries/resolve_thread.graphql");
+const UNRESOLVE_THREAD: &str = include_str!("queries/unresolve_thread.graphql");
 const VIEWER: &str = "query { viewer { login avatarUrl } }";
+
+fn side_str(side: DiffSide) -> &'static str {
+    match side {
+        DiffSide::Left => "LEFT",
+        DiffSide::Right => "RIGHT",
+    }
+}
 
 /// The three PR-list tabs. Each maps to a GitHub search qualifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -155,6 +168,57 @@ impl GithubClient {
                 SearchNode::Other(_) => None,
             })
             .collect())
+    }
+
+    // ---- writes (all immediate, i.e. not batched into a pending review) ----
+
+    /// Posts a standalone line comment as a one-comment COMMENT review, which
+    /// GitHub submits immediately (no pending draft). `commit` is the PR head
+    /// sha; passing it pins the comment to the current diff.
+    pub fn add_line_comment(
+        &self,
+        pr_node_id: &NodeId,
+        commit: Option<&str>,
+        anchor: &CommentAnchor,
+        body: &str,
+    ) -> Result<(), TransportError> {
+        let mut vars = json!({
+            "prId": pr_node_id.0,
+            "path": anchor.path,
+            "line": anchor.line,
+            "side": side_str(anchor.side),
+            "body": body,
+        });
+        if let Some(commit) = commit {
+            vars["commit"] = json!(commit);
+        }
+        if let Some(start) = anchor.start_line {
+            vars["startLine"] = json!(start);
+            vars["startSide"] = json!(side_str(anchor.start_side.unwrap_or(anchor.side)));
+        }
+        self.transport.graphql(ADD_LINE_COMMENT, &vars)?;
+        Ok(())
+    }
+
+    /// Replies to an existing review thread (posted immediately).
+    pub fn reply_to_thread(&self, thread_id: &NodeId, body: &str) -> Result<(), TransportError> {
+        self.transport.graphql(
+            REPLY_TO_THREAD,
+            &json!({ "threadId": thread_id.0, "body": body }),
+        )?;
+        Ok(())
+    }
+
+    pub fn resolve_thread(&self, thread_id: &NodeId) -> Result<(), TransportError> {
+        self.transport
+            .graphql(RESOLVE_THREAD, &json!({ "threadId": thread_id.0 }))?;
+        Ok(())
+    }
+
+    pub fn unresolve_thread(&self, thread_id: &NodeId) -> Result<(), TransportError> {
+        self.transport
+            .graphql(UNRESOLVE_THREAD, &json!({ "threadId": thread_id.0 }))?;
+        Ok(())
     }
 }
 

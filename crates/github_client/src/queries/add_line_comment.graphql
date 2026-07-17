@@ -1,0 +1,32 @@
+mutation AddLineComment(
+  $prId: ID!
+  $commit: GitObjectID
+  $path: String!
+  $line: Int!
+  $side: DiffSide!
+  $startLine: Int
+  $startSide: DiffSide
+  $body: String!
+) {
+  addPullRequestReview(
+    input: {
+      pullRequestId: $prId
+      commitOID: $commit
+      event: COMMENT
+      threads: [
+        {
+          path: $path
+          line: $line
+          side: $side
+          startLine: $startLine
+          startSide: $startSide
+          body: $body
+        }
+      ]
+    }
+  ) {
+    pullRequestReview {
+      id
+    }
+  }
+}

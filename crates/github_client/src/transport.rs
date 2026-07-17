@@ -105,14 +105,39 @@ impl GhCliTransport {
     }
 
     fn run(&self, args: &[String]) -> Result<Value, TransportError> {
+        self.run_with_stdin(args, None)
+    }
+
+    fn run_with_stdin(
+        &self,
+        args: &[String],
+        stdin: Option<&str>,
+    ) -> Result<Value, TransportError> {
+        use std::io::Write;
+        use std::process::Stdio;
+
         let mut cmd = Command::new(&self.program);
         cmd.args(args);
         if let Some(token) = self.account_token()? {
             cmd.env("GH_TOKEN", token);
         }
-        let out = cmd
-            .output()
-            .map_err(|_| TransportError::GhMissing)?;
+        let out = if let Some(body) = stdin {
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd.spawn().map_err(|_| TransportError::GhMissing)?;
+            child
+                .stdin
+                .take()
+                .expect("stdin piped")
+                .write_all(body.as_bytes())
+                .map_err(|e| TransportError::Other(format!("writing gh stdin: {e}")))?;
+            child
+                .wait_with_output()
+                .map_err(|e| TransportError::Other(format!("gh: {e}")))?
+        } else {
+            cmd.output().map_err(|_| TransportError::GhMissing)?
+        };
         let stdout = String::from_utf8_lossy(&out.stdout);
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -122,7 +147,11 @@ impl GhCliTransport {
                 *self.token.lock().unwrap() = None;
                 return Err(TransportError::NotAuthenticated);
             }
-            // gh prints API errors to stdout as JSON when possible.
+            // gh prints API errors to stdout as JSON when possible; pull out
+            // the human-readable message(s) if we can.
+            if let Some(msg) = extract_error_message(&stdout) {
+                return Err(TransportError::Api(msg));
+            }
             let detail = if stderr.trim().is_empty() { &stdout } else { &stderr };
             return Err(TransportError::Api(detail.trim().to_string()));
         }
@@ -134,24 +163,50 @@ impl GhCliTransport {
     }
 }
 
+/// Pulls a readable message out of a GitHub error body: GraphQL
+/// `{errors:[{message}]}` or REST `{message, errors:[...]}`.
+fn extract_error_message(stdout: &str) -> Option<String> {
+    let json: Value = serde_json::from_str(stdout).ok()?;
+    if let Some(errors) = json.get("errors").and_then(|e| e.as_array()) {
+        let msgs: Vec<String> = errors
+            .iter()
+            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+            .map(str::to_string)
+            .collect();
+        if !msgs.is_empty() {
+            return Some(msgs.join("; "));
+        }
+    }
+    json.get("message")
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
+}
+
 impl GithubTransport for GhCliTransport {
     fn graphql(&self, query: &str, variables: &Value) -> Result<Value, TransportError> {
-        let mut args = vec![
+        // Pass the whole request as a JSON body on stdin so arbitrarily
+        // nested variables (e.g. a `threads` array of objects) work — the
+        // -f/-F flags only carry scalars.
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let args = vec![
             "api".to_string(),
             "graphql".to_string(),
-            "-f".to_string(),
-            format!("query={query}"),
+            "--input".to_string(),
+            "-".to_string(),
         ];
-        if let Some(vars) = variables.as_object() {
-            for (key, value) in vars {
-                match value {
-                    Value::String(s) => args.extend(["-f".into(), format!("{key}={s}")]),
-                    // -F parses numbers/booleans as typed values.
-                    other => args.extend(["-F".into(), format!("{key}={other}")]),
-                }
+        let response = self.run_with_stdin(&args, Some(&body.to_string()))?;
+        // GraphQL surfaces mutation failures in `errors` with data present or
+        // null; treat any `errors` as a hard error.
+        if let Some(errors) = response.get("errors").and_then(|e| e.as_array()) {
+            if !errors.is_empty() {
+                let msgs: Vec<String> = errors
+                    .iter()
+                    .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                    .map(str::to_string)
+                    .collect();
+                return Err(TransportError::Api(msgs.join("; ")));
             }
         }
-        let response = self.run(&args)?;
         match response.get("data") {
             Some(data) if !data.is_null() => Ok(data.clone()),
             _ => Err(TransportError::Api(format!(

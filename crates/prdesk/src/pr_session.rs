@@ -5,24 +5,25 @@ use crate::config::{self, Config};
 use crate::util::relative_time;
 use diff_kit::{DiffLine, DiffRow, FileDiff, FileStatus, LayoutOptions, layout_unified};
 use github_client::GithubClient;
-use github_types::{PrSummary, ReviewThread};
+use github_types::{CommentAnchor, DiffSide, NodeId, PrSummary, ReviewThread};
 use std::path::PathBuf;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
     SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    input::{Input, InputState},
     tag::Tag,
 };
 use std::collections::{HashMap, HashSet};
 
 const MONO: &str = "Menlo";
 const ROW_HEIGHT: f32 = 22.0;
-/// Left offset that aligns thread cards with the code column (two gutters +
-/// marker).
-const CODE_INDENT: f32 = 44. + 44. + 20.;
+/// Left offset that aligns thread cards with the code column (add-comment
+/// column + two gutters + marker).
+const CODE_INDENT: f32 = 18. + 44. + 44. + 20.;
 
 pub enum SessionEvent {
     Close,
@@ -58,6 +59,28 @@ struct LoadedDiff {
     threads: Vec<ReviewThread>,
 }
 
+/// What an open composer will post.
+#[derive(Clone)]
+enum ComposerTarget {
+    /// Reply to an existing thread.
+    Reply { thread_id: NodeId, path: String },
+    /// A brand-new line comment.
+    NewComment(CommentAnchor),
+}
+
+#[derive(Clone, PartialEq)]
+enum ComposerState {
+    Editing,
+    Sending,
+    Failed(String),
+}
+
+struct Composer {
+    target: ComposerTarget,
+    input: Entity<InputState>,
+    state: ComposerState,
+}
+
 pub struct PrSessionView {
     client: GithubClient,
     pr: PrSummary,
@@ -79,6 +102,9 @@ pub struct PrSessionView {
     checkout: CheckoutState,
     clone_hint: Option<PathBuf>,
     clone_roots: Vec<PathBuf>,
+    /// Thread ids with an in-flight resolve/unresolve toggle.
+    resolving: HashSet<String>,
+    composer: Option<Composer>,
     generation: u64,
     pub focus_handle: FocusHandle,
 }
@@ -108,6 +134,8 @@ impl PrSessionView {
             list_state: ListState::new(0, ListAlignment::Top, px(512.)),
             sidebar_scroll: UniformListScrollHandle::new(),
             checkout: CheckoutState::Resolving,
+            resolving: HashSet::new(),
+            composer: None,
             generation: 0,
             focus_handle: cx.focus_handle(),
         };
@@ -278,8 +306,237 @@ impl PrSessionView {
         cx.notify();
     }
 
-    fn thread(&self, id: &github_types::NodeId) -> Option<&ReviewThread> {
+    fn thread(&self, id: &NodeId) -> Option<&ReviewThread> {
         self.thread_ix.get(&id.0).and_then(|&ix| self.threads.get(ix))
+    }
+
+    // ---- writes: resolve/unresolve and the comment composer ----
+
+    /// Optimistically flips a thread's resolved flag, then reconciles with the
+    /// server; reverts on failure.
+    fn toggle_thread_resolved(&mut self, thread_id: NodeId, cx: &mut Context<Self>) {
+        let Some(&ix) = self.thread_ix.get(&thread_id.0) else {
+            return;
+        };
+        if self.resolving.contains(&thread_id.0) {
+            return;
+        }
+        let want_resolved = !self.threads[ix].is_resolved;
+        // Optimistic flip.
+        self.threads[ix].is_resolved = want_resolved;
+        self.resolving.insert(thread_id.0.clone());
+        self.relayout();
+        cx.notify();
+
+        let client = self.client.clone();
+        let id = thread_id.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if want_resolved {
+                        client.resolve_thread(&id)
+                    } else {
+                        client.unresolve_thread(&id)
+                    }
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                this.resolving.remove(&thread_id.0);
+                if let Err(err) = result {
+                    // Revert the optimistic flip.
+                    if let Some(&ix) = this.thread_ix.get(&thread_id.0) {
+                        this.threads[ix].is_resolved = !want_resolved;
+                    }
+                    this.relayout();
+                    this.flash_error(format!("Couldn't update thread: {err}"), cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_reply(&mut self, thread_id: NodeId, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .placeholder("Write a reply…")
+        });
+        window.focus(&input.focus_handle(cx));
+        self.composer = Some(Composer {
+            target: ComposerTarget::Reply { thread_id, path },
+            input,
+            state: ComposerState::Editing,
+        });
+        cx.notify();
+    }
+
+    fn open_new_comment(&mut self, anchor: CommentAnchor, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .placeholder("Leave a comment on this line…")
+        });
+        window.focus(&input.focus_handle(cx));
+        self.composer = Some(Composer {
+            target: ComposerTarget::NewComment(anchor),
+            input,
+            state: ComposerState::Editing,
+        });
+        cx.notify();
+    }
+
+    fn cancel_composer(&mut self, cx: &mut Context<Self>) {
+        self.composer = None;
+        cx.notify();
+    }
+
+    fn submit_composer(&mut self, cx: &mut Context<Self>) {
+        let Some(composer) = &self.composer else { return };
+        if composer.state == ComposerState::Sending {
+            return;
+        }
+        let body = composer.input.read(cx).value().trim().to_string();
+        if body.is_empty() {
+            return;
+        }
+        let target = composer.target.clone();
+        if let Some(composer) = &mut self.composer {
+            composer.state = ComposerState::Sending;
+        }
+        cx.notify();
+
+        let client = self.client.clone();
+        let pr_id = self.pr.node_id.clone();
+        let head_sha = self.pr.head_sha.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    match &target {
+                        ComposerTarget::Reply { thread_id, .. } => {
+                            client.reply_to_thread(thread_id, &body)
+                        }
+                        ComposerTarget::NewComment(anchor) => client.add_line_comment(
+                            &pr_id,
+                            (!head_sha.is_empty()).then_some(head_sha.as_str()),
+                            anchor,
+                            &body,
+                        ),
+                    }
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.composer = None;
+                        // Pull authoritative state so the new comment/reply
+                        // shows with its real id, author, and timestamp.
+                        this.refresh(cx);
+                    }
+                    Err(err) => {
+                        if let Some(composer) = &mut this.composer {
+                            composer.state = ComposerState::Failed(format!("{err}"));
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn flash_error(&mut self, message: String, cx: &mut Context<Self>) {
+        // For now surface transient errors via the checkout/error channel by
+        // logging; a toast layer arrives with the notification work in M5.
+        eprintln!("prdesk: {message}");
+        cx.notify();
+    }
+
+    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let composer = self.composer.as_ref().expect("composer present");
+        let (title, send_label) = match &composer.target {
+            ComposerTarget::Reply { path, .. } => {
+                (format!("Reply to thread in {path}"), "Reply")
+            }
+            ComposerTarget::NewComment(anchor) => (
+                format!(
+                    "Comment on {}:{} ({})",
+                    anchor.path,
+                    anchor.line,
+                    match anchor.side {
+                        DiffSide::Left => "old",
+                        DiffSide::Right => "new",
+                    }
+                ),
+                "Comment",
+            ),
+        };
+        let sending = composer.state == ComposerState::Sending;
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.4))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .truncate()
+                            .child(SharedString::from(title)),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(72.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(Input::new(&composer.input).h_full()),
+            );
+
+        if let ComposerState::Failed(err) = &composer.state {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xf85149))
+                    .child(SharedString::from(format!(
+                        "Failed to post: {err} — your text is preserved; try again."
+                    ))),
+            );
+        }
+
+        panel.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .justify_end()
+                .child(
+                    Button::new("composer-cancel")
+                        .label("Cancel")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_composer(cx))),
+                )
+                .child(
+                    Button::new("composer-send")
+                        .label(if sending { "Sending…" } else { send_label })
+                        .primary()
+                        .small()
+                        .disabled(sending)
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_composer(cx))),
+                ),
+        )
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -588,7 +845,8 @@ impl PrSessionView {
                     };
                     Some((clone.join(&file.path), line_no))
                 });
-                render_diff_line(line, *in_comment_range, ix, zed, cx)
+                let anchor = self.files.get(*file_ix).map(|file| anchor_for_line(&file.path, line));
+                render_diff_line(line, *in_comment_range, ix, zed, anchor, entity, cx)
             }
             DiffRow::Thread { thread_id } => {
                 let Some(thread) = self.thread(thread_id) else {
@@ -617,11 +875,28 @@ impl PrSessionView {
     }
 }
 
+/// The anchor a new comment on `line` would use.
+fn anchor_for_line(path: &str, line: &DiffLine) -> CommentAnchor {
+    let (side, line_no) = match line {
+        DiffLine::Context { new, .. } | DiffLine::Added { new, .. } => (DiffSide::Right, *new),
+        DiffLine::Removed { old, .. } => (DiffSide::Left, *old),
+    };
+    CommentAnchor {
+        path: path.to_string(),
+        side,
+        line: line_no,
+        start_line: None,
+        start_side: None,
+    }
+}
+
 fn render_diff_line(
     line: &DiffLine,
     in_comment_range: bool,
     row_ix: usize,
     zed: Option<(PathBuf, Option<u32>)>,
+    anchor: Option<CommentAnchor>,
+    entity: &Entity<PrSessionView>,
     cx: &App,
 ) -> gpui::AnyElement {
     let (old, new, marker, bg): (Option<u32>, Option<u32>, &str, Option<gpui::Hsla>) = match line {
@@ -644,8 +919,10 @@ fn render_diff_line(
                 n.map(|n| n.to_string()).unwrap_or_default(),
             ))
     };
+    let group_name = SharedString::from(format!("line-{row_ix}"));
     let mut el = div()
         .id(("line", row_ix))
+        .group(group_name.clone())
         .h(px(ROW_HEIGHT))
         .w_full()
         .flex()
@@ -665,7 +942,34 @@ fn render_diff_line(
             }
         });
     }
-    el.child(gutter(old))
+
+    // A "+" affordance that reveals on row hover and opens the composer.
+    let add = {
+        let mut cell = div().w(px(18.)).flex_shrink_0().flex().justify_center();
+        if let Some(anchor) = anchor {
+            let entity = entity.clone();
+            cell = cell
+                .child(
+                    div()
+                        .id(("add-comment", row_ix))
+                        .invisible()
+                        .group_hover(group_name.clone(), |s| s.visible())
+                        .text_color(rgb(0x539bf5))
+                        .cursor_pointer()
+                        .child("+")
+                        .on_click(move |_, window, cx| {
+                            let anchor = anchor.clone();
+                            entity.update(cx, |this, cx| {
+                                this.open_new_comment(anchor, window, cx);
+                            });
+                        }),
+                );
+        }
+        cell
+    };
+
+    el.child(add)
+        .child(gutter(old))
         .child(gutter(new))
         .child(
             div()
@@ -840,6 +1144,48 @@ fn render_thread_card(
                     ),
             );
         }
+
+        // Action row: Reply + Resolve/Unresolve.
+        let thread_id = thread.id.clone();
+        let path = thread.path.clone();
+        let resolved = thread.is_resolved;
+        let reply_entity = entity.clone();
+        let resolve_entity = entity.clone();
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(cx.theme().border.opacity(0.5))
+                .child(
+                    Button::new(("reply", row_ix))
+                        .label("Reply")
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, window, cx| {
+                            let (thread_id, path) = (thread_id.clone(), path.clone());
+                            reply_entity.update(cx, |this, cx| {
+                                this.open_reply(thread_id, path, window, cx);
+                            });
+                        }),
+                )
+                .child({
+                    let thread_id2 = thread.id.clone();
+                    Button::new(("resolve", row_ix))
+                        .label(if resolved { "Unresolve" } else { "Resolve" })
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, _, cx| {
+                            let thread_id2 = thread_id2.clone();
+                            resolve_entity.update(cx, |this, cx| {
+                                this.toggle_thread_resolved(thread_id2, cx);
+                            });
+                        })
+                }),
+        );
     }
 
     div()
@@ -957,7 +1303,7 @@ impl Render for PrSessionView {
                     .into_any_element()
             }
         };
-        div()
+        let mut root = div()
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -966,6 +1312,10 @@ impl Render for PrSessionView {
             .text_color(cx.theme().foreground)
             .child(self.render_header(cx))
             .child(self.render_checkout_bar(cx))
-            .child(body)
+            .child(body);
+        if self.composer.is_some() {
+            root = root.child(self.render_composer(cx));
+        }
+        root
     }
 }
