@@ -1210,8 +1210,10 @@ impl PrSessionView {
                     };
                     Some((clone.join(&file.path), line_no))
                 });
-                let anchor = self.files.get(*file_ix).map(|file| anchor_for_line(&file.path, line));
-                render_diff_line(line, *in_comment_range, ix, zed, anchor, entity, cx)
+                let file = self.files.get(*file_ix);
+                let anchor = file.map(|f| anchor_for_line(&f.path, line));
+                let lang = file.and_then(|f| syntax::lang_for_path(&f.path));
+                render_diff_line(line, *in_comment_range, ix, zed, anchor, lang, entity, cx)
             }
             DiffRow::Thread { thread_id } => {
                 let Some(thread) = self.thread(thread_id) else {
@@ -1255,12 +1257,66 @@ fn anchor_for_line(path: &str, line: &DiffLine) -> CommentAnchor {
     }
 }
 
+/// Maps a semantic highlight kind to a color (catppuccin-mocha-ish, tuned for
+/// the dark theme).
+fn highlight_style(kind: syntax::Highlight) -> gpui::HighlightStyle {
+    use syntax::Highlight as H;
+    let color = match kind {
+        H::Keyword => rgb(0xcba6f7),
+        H::Function => rgb(0x89b4fa),
+        H::Type => rgb(0xf9e2af),
+        H::String => rgb(0xa6e3a1),
+        H::Number | H::Constant => rgb(0xfab387),
+        H::Comment => rgb(0x7f849c),
+        H::Operator => rgb(0x89dceb),
+        H::Punctuation => rgb(0xbac2de),
+        H::Property => rgb(0x89b4fa),
+        H::Variable => rgb(0xcdd6f4),
+    };
+    gpui::HighlightStyle {
+        color: Some(color.into()),
+        ..Default::default()
+    }
+}
+
+/// Builds the code cell for a line, syntax-highlighted when a language is known.
+fn code_cell(text: &str, lang: Option<syntax::Lang>, cx: &App) -> gpui::AnyElement {
+    let spans = lang
+        .map(|l| syntax::highlight_line(l, text))
+        .unwrap_or_default();
+    if spans.is_empty() {
+        return div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(SharedString::from(text.to_string()))
+            .into_any_element();
+    }
+    let highlights: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = spans
+        .iter()
+        .map(|s| (s.start..s.end, highlight_style(s.kind)))
+        .collect();
+    let _ = cx;
+    div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(
+            gpui::StyledText::new(SharedString::from(text.to_string()))
+                .with_highlights(highlights),
+        )
+        .into_any_element()
+}
+
 fn render_diff_line(
     line: &DiffLine,
     in_comment_range: bool,
     row_ix: usize,
     zed: Option<(PathBuf, Option<u32>)>,
     anchor: Option<CommentAnchor>,
+    lang: Option<syntax::Lang>,
     entity: &Entity<PrSessionView>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -1344,14 +1400,7 @@ fn render_diff_line(
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from(marker)),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(SharedString::from(line.text().to_string())),
-        )
+        .child(code_cell(line.text(), lang, cx))
         .into_any_element()
 }
 
@@ -1502,11 +1551,7 @@ fn render_thread_card(
                     .border_t_1()
                     .border_color(cx.theme().border.opacity(0.5))
                     .child(meta)
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(SharedString::from(comment.body_markdown.clone())),
-                    ),
+                    .child(render_comment_body(&comment.body_markdown, cx)),
             );
         }
 
@@ -1565,6 +1610,71 @@ fn small_tag(label: &'static str, color: gpui::Hsla) -> impl IntoElement {
     Tag::custom(color.opacity(0.15), color, color.opacity(0.4))
         .small()
         .child(SharedString::from(label))
+}
+
+/// Lightweight markdown for comment bodies: preserves line breaks and renders
+/// ``` fenced blocks in monospace. Full markdown (via a text engine) is a
+/// later enhancement.
+fn render_comment_body(body: &str, cx: &App) -> gpui::AnyElement {
+    let mut container = div().flex().flex_col().gap_1().text_sm();
+    let mut in_fence = false;
+    let mut code_buf: Vec<String> = Vec::new();
+    let mut text_buf: Vec<String> = Vec::new();
+
+    let flush_text = |container: gpui::Div, buf: &mut Vec<String>| -> gpui::Div {
+        if buf.is_empty() {
+            return container;
+        }
+        let lines = std::mem::take(buf);
+        container.child(
+            div().flex().flex_col().children(
+                lines
+                    .into_iter()
+                    .map(|l| div().child(SharedString::from(l))),
+            ),
+        )
+    };
+    let flush_code = |container: gpui::Div, buf: &mut Vec<String>, cx: &App| -> gpui::Div {
+        if buf.is_empty() {
+            return container;
+        }
+        let lines = std::mem::take(buf);
+        container.child(
+            div()
+                .font_family(MONO)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(cx.theme().background.opacity(0.6))
+                .children(
+                    lines
+                        .into_iter()
+                        .map(|l| div().whitespace_nowrap().overflow_hidden().child(SharedString::from(l))),
+                ),
+        )
+    };
+
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_fence {
+                container = flush_code(container, &mut code_buf, cx);
+                in_fence = false;
+            } else {
+                container = flush_text(container, &mut text_buf);
+                in_fence = true;
+            }
+            continue;
+        }
+        if in_fence {
+            code_buf.push(line.to_string());
+        } else {
+            text_buf.push(line.to_string());
+        }
+    }
+    // Unclosed fence: render what we gathered as code anyway.
+    container = flush_text(container, &mut text_buf);
+    container = flush_code(container, &mut code_buf, cx);
+    container.into_any_element()
 }
 
 /// Blocking: runs on the background executor.
