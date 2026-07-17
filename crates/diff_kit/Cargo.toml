@@ -7,3 +7,7 @@ description = "Patch parsing, diff row layout, and review-comment anchor mapping
 [dependencies]
 github_types = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+serde_json = { workspace = true }
