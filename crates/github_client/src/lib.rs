@@ -8,19 +8,33 @@ mod transport;
 pub use transport::{GhCliTransport, GithubTransport, TransportError};
 
 use github_types::{
-    CommentAnchor, DiffSide, NodeId, PrFile, PrNumber, PrSummary, RepoId, ReviewThread,
+    CommentAnchor, DiffSide, MergeMethod, NodeId, PrFile, PrNumber, PrReviewState, PrSummary,
+    RepoId, ReviewThread, ReviewVerdict,
 };
-use parse::{RestPrFile, SearchNode, SearchPrsData, ThreadsData};
+use parse::{ExtraData, RestPrFile, SearchNode, SearchPrsData, ThreadsData};
 use serde_json::json;
 use std::sync::Arc;
 
 const SEARCH_PRS: &str = include_str!("queries/search_prs.graphql");
 const PR_REVIEW_THREADS: &str = include_str!("queries/pr_review_threads.graphql");
+const PR_EXTRA: &str = include_str!("queries/pr_extra.graphql");
 const ADD_LINE_COMMENT: &str = include_str!("queries/add_line_comment.graphql");
 const REPLY_TO_THREAD: &str = include_str!("queries/reply_to_thread.graphql");
 const RESOLVE_THREAD: &str = include_str!("queries/resolve_thread.graphql");
 const UNRESOLVE_THREAD: &str = include_str!("queries/unresolve_thread.graphql");
+const CREATE_PENDING_REVIEW: &str = include_str!("queries/create_pending_review.graphql");
+const ADD_REVIEW_THREAD: &str = include_str!("queries/add_review_thread.graphql");
+const SUBMIT_REVIEW: &str = include_str!("queries/submit_review.graphql");
+const DELETE_PENDING_REVIEW: &str = include_str!("queries/delete_pending_review.graphql");
 const VIEWER: &str = "query { viewer { login avatarUrl } }";
+
+fn verdict_str(verdict: ReviewVerdict) -> &'static str {
+    match verdict {
+        ReviewVerdict::Approve => "APPROVE",
+        ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+        ReviewVerdict::Comment => "COMMENT",
+    }
+}
 
 fn side_str(side: DiffSide) -> &'static str {
     match side {
@@ -218,6 +232,99 @@ impl GithubClient {
     pub fn unresolve_thread(&self, thread_id: &NodeId) -> Result<(), TransportError> {
         self.transport
             .graphql(UNRESOLVE_THREAD, &json!({ "threadId": thread_id.0 }))?;
+        Ok(())
+    }
+
+    // ---- pending review lifecycle + merge ----
+
+    /// The PR's mergeability plus the viewer's existing PENDING review, if any.
+    pub fn pr_review_state(
+        &self,
+        repo: &RepoId,
+        number: PrNumber,
+    ) -> Result<PrReviewState, TransportError> {
+        let data = self.transport.graphql(
+            PR_EXTRA,
+            &json!({ "owner": repo.owner, "name": repo.name, "number": number.0 }),
+        )?;
+        let parsed: ExtraData = serde_json::from_value(data)
+            .map_err(|e| TransportError::Other(format!("bad pr_extra response: {e}")))?;
+        Ok(PrReviewState::from(parsed.repository.pull_request))
+    }
+
+    /// Creates a new empty PENDING review and returns its node id.
+    pub fn create_pending_review(&self, pr_node_id: &NodeId) -> Result<NodeId, TransportError> {
+        let data = self
+            .transport
+            .graphql(CREATE_PENDING_REVIEW, &json!({ "prId": pr_node_id.0 }))?;
+        data.pointer("/addPullRequestReview/pullRequestReview/id")
+            .and_then(|v| v.as_str())
+            .map(|s| NodeId(s.to_string()))
+            .ok_or_else(|| TransportError::Api(format!("no review id in response: {data}")))
+    }
+
+    /// Adds a draft comment thread to an existing pending review.
+    pub fn add_comment_to_review(
+        &self,
+        review_id: &NodeId,
+        anchor: &CommentAnchor,
+        body: &str,
+    ) -> Result<(), TransportError> {
+        let mut vars = json!({
+            "reviewId": review_id.0,
+            "path": anchor.path,
+            "line": anchor.line,
+            "side": side_str(anchor.side),
+            "body": body,
+        });
+        if let Some(start) = anchor.start_line {
+            vars["startLine"] = json!(start);
+            vars["startSide"] = json!(side_str(anchor.start_side.unwrap_or(anchor.side)));
+        }
+        self.transport.graphql(ADD_REVIEW_THREAD, &vars)?;
+        Ok(())
+    }
+
+    /// Submits a pending review with a verdict and optional summary.
+    pub fn submit_review(
+        &self,
+        review_id: &NodeId,
+        verdict: ReviewVerdict,
+        body: &str,
+    ) -> Result<(), TransportError> {
+        self.transport.graphql(
+            SUBMIT_REVIEW,
+            &json!({
+                "reviewId": review_id.0,
+                "event": verdict_str(verdict),
+                "body": body,
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// Discards a pending review and all its draft comments.
+    pub fn delete_pending_review(&self, review_id: &NodeId) -> Result<(), TransportError> {
+        self.transport
+            .graphql(DELETE_PENDING_REVIEW, &json!({ "reviewId": review_id.0 }))?;
+        Ok(())
+    }
+
+    /// Merges a PR. `sha` guards against merging a head that moved since the
+    /// diff was loaded (GitHub rejects with 409 on mismatch).
+    pub fn merge_pr(
+        &self,
+        repo: &RepoId,
+        number: PrNumber,
+        method: MergeMethod,
+        sha: &str,
+    ) -> Result<(), TransportError> {
+        let path = format!("repos/{}/{}/pulls/{}/merge", repo.owner, repo.name, number.0);
+        let mut body = json!({ "merge_method": method.as_rest() });
+        if !sha.is_empty() {
+            body["sha"] = json!(sha);
+        }
+        self.transport.rest("PUT", &path, Some(&body))?;
         Ok(())
     }
 }

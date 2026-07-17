@@ -4,8 +4,9 @@
 
 use chrono::{DateTime, Utc};
 use github_types::{
-    Actor, CheckState, DiffSide, FileChangeStatus, NodeId, PrFile, PrNumber, PrState, PrSummary,
-    RepoId, ReviewComment, ReviewDecision, ReviewThread,
+    Actor, CheckState, DiffSide, FileChangeStatus, MergeableState, NodeId, PendingReview, PrFile,
+    PrNumber, PrReviewState, PrState, PrSummary, RepoId, ReviewComment, ReviewDecision,
+    ReviewThread,
 };
 use serde::Deserialize;
 
@@ -149,6 +150,59 @@ impl From<PrNode> for PrSummary {
             head_sha: node.head_ref_oid,
             updated_at: node.updated_at,
             url: node.url,
+        }
+    }
+}
+
+// ---- pr_extra query (pending review + mergeability) ----
+
+#[derive(Deserialize)]
+pub struct ExtraData {
+    pub repository: ExtraRepo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraRepo {
+    pub pull_request: ExtraPr,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraPr {
+    pub id: String,
+    pub mergeable: Option<String>,
+    pub merged: bool,
+    pub reviews: ExtraReviews,
+}
+
+#[derive(Deserialize)]
+pub struct ExtraReviews {
+    pub nodes: Vec<ExtraReview>,
+}
+
+#[derive(Deserialize)]
+pub struct ExtraReview {
+    pub id: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+impl From<ExtraPr> for PrReviewState {
+    fn from(pr: ExtraPr) -> Self {
+        let mergeable = match pr.mergeable.as_deref() {
+            Some("MERGEABLE") => MergeableState::Mergeable,
+            Some("CONFLICTING") => MergeableState::Conflicting,
+            _ => MergeableState::Unknown,
+        };
+        PrReviewState {
+            node_id: NodeId(pr.id),
+            mergeable,
+            merged: pr.merged,
+            pending_review: pr.reviews.nodes.into_iter().next().map(|r| PendingReview {
+                id: NodeId(r.id),
+                body: r.body,
+            }),
         }
     }
 }

@@ -1,0 +1,7 @@
+mutation CreatePendingReview($prId: ID!) {
+  addPullRequestReview(input: { pullRequestId: $prId }) {
+    pullRequestReview {
+      id
+    }
+  }
+}

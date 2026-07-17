@@ -204,11 +204,38 @@ pub struct PendingReview {
     pub body: String,
 }
 
+/// Live review/merge state fetched separately from the diff.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrReviewState {
+    pub node_id: NodeId,
+    pub mergeable: MergeableState,
+    pub merged: bool,
+    pub pending_review: Option<PendingReview>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewVerdict {
     Approve,
     RequestChanges,
     Comment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The value GitHub's REST merge endpoint expects.
+    pub fn as_rest(&self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
 }
 
 #[cfg(test)]

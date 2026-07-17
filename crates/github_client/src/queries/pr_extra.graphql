@@ -1,0 +1,15 @@
+query PrExtra($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      mergeable
+      merged
+      reviews(states: PENDING, first: 1) {
+        nodes {
+          id
+          body
+        }
+      }
+    }
+  }
+}

@@ -5,7 +5,10 @@ use crate::config::{self, Config};
 use crate::util::relative_time;
 use diff_kit::{DiffLine, DiffRow, FileDiff, FileStatus, LayoutOptions, layout_unified};
 use github_client::GithubClient;
-use github_types::{CommentAnchor, DiffSide, NodeId, PrSummary, ReviewThread};
+use github_types::{
+    CommentAnchor, DiffSide, MergeMethod, MergeableState, NodeId, PrReviewState, PrSummary,
+    ReviewThread, ReviewVerdict,
+};
 use std::path::PathBuf;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
@@ -57,6 +60,14 @@ struct LoadedDiff {
     /// (additions, deletions) parallel to `files`.
     stats: Vec<(u64, u64)>,
     threads: Vec<ReviewThread>,
+    review_state: Option<PrReviewState>,
+}
+
+/// The finish-review drawer: a summary box + verdict choice.
+struct ReviewDrawer {
+    summary: Entity<InputState>,
+    submitting: bool,
+    error: Option<String>,
 }
 
 /// What an open composer will post.
@@ -105,6 +116,10 @@ pub struct PrSessionView {
     /// Thread ids with an in-flight resolve/unresolve toggle.
     resolving: HashSet<String>,
     composer: Option<Composer>,
+    /// Live review/merge state (pending review, mergeability).
+    review_state: Option<PrReviewState>,
+    review_drawer: Option<ReviewDrawer>,
+    merging: bool,
     generation: u64,
     pub focus_handle: FocusHandle,
 }
@@ -136,6 +151,9 @@ impl PrSessionView {
             checkout: CheckoutState::Resolving,
             resolving: HashSet::new(),
             composer: None,
+            review_state: None,
+            review_drawer: None,
+            merging: false,
             generation: 0,
             focus_handle: cx.focus_handle(),
         };
@@ -253,6 +271,7 @@ impl PrSessionView {
                             .map(|(ix, t)| (t.id.0.clone(), ix))
                             .collect();
                         this.threads = loaded.threads;
+                        this.review_state = loaded.review_state;
                         this.load = SessionLoad::Ready;
                         this.relayout();
                     }
@@ -392,7 +411,10 @@ impl PrSessionView {
         cx.notify();
     }
 
-    fn submit_composer(&mut self, cx: &mut Context<Self>) {
+    /// Posts the composer's text. `pending` batches a new comment into a
+    /// pending review instead of posting it immediately (ignored for replies,
+    /// which are always immediate).
+    fn submit_composer(&mut self, pending: bool, cx: &mut Context<Self>) {
         let Some(composer) = &self.composer else { return };
         if composer.state == ComposerState::Sending {
             return;
@@ -410,6 +432,11 @@ impl PrSessionView {
         let client = self.client.clone();
         let pr_id = self.pr.node_id.clone();
         let head_sha = self.pr.head_sha.clone();
+        // For pending mode, reuse an existing pending review or create one.
+        let existing_review = self
+            .review_state
+            .as_ref()
+            .and_then(|s| s.pending_review.as_ref().map(|r| r.id.clone()));
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -417,12 +444,19 @@ impl PrSessionView {
                         ComposerTarget::Reply { thread_id, .. } => {
                             client.reply_to_thread(thread_id, &body)
                         }
-                        ComposerTarget::NewComment(anchor) => client.add_line_comment(
+                        ComposerTarget::NewComment(anchor) if !pending => client.add_line_comment(
                             &pr_id,
                             (!head_sha.is_empty()).then_some(head_sha.as_str()),
                             anchor,
                             &body,
                         ),
+                        ComposerTarget::NewComment(anchor) => {
+                            let review_id = match existing_review {
+                                Some(id) => id,
+                                None => client.create_pending_review(&pr_id)?,
+                            };
+                            client.add_comment_to_review(&review_id, anchor, &body)
+                        }
                     }
                 })
                 .await;
@@ -447,9 +481,134 @@ impl PrSessionView {
         .detach();
     }
 
+    // ---- finish-review drawer + merge ----
+
+    fn open_review_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seed = self
+            .review_state
+            .as_ref()
+            .and_then(|s| s.pending_review.as_ref())
+            .map(|r| r.body.clone())
+            .unwrap_or_default();
+        let summary = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .placeholder("Review summary (optional)…")
+        });
+        if !seed.is_empty() {
+            summary.update(cx, |s, cx| s.set_value(seed, window, cx));
+        }
+        window.focus(&summary.focus_handle(cx));
+        self.review_drawer = Some(ReviewDrawer { summary, submitting: false, error: None });
+        cx.notify();
+    }
+
+    fn submit_review(&mut self, verdict: ReviewVerdict, cx: &mut Context<Self>) {
+        let Some(drawer) = &self.review_drawer else { return };
+        if drawer.submitting {
+            return;
+        }
+        let Some(review_id) = self
+            .review_state
+            .as_ref()
+            .and_then(|s| s.pending_review.as_ref().map(|r| r.id.clone()))
+        else {
+            if let Some(drawer) = &mut self.review_drawer {
+                drawer.error = Some("No pending review to submit.".into());
+            }
+            cx.notify();
+            return;
+        };
+        let body = drawer.summary.read(cx).value().to_string();
+        if let Some(drawer) = &mut self.review_drawer {
+            drawer.submitting = true;
+            drawer.error = None;
+        }
+        cx.notify();
+
+        let client = self.client.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { client.submit_review(&review_id, verdict, &body) })
+                .await;
+            view.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.review_drawer = None;
+                        this.refresh(cx);
+                    }
+                    Err(err) => {
+                        if let Some(drawer) = &mut this.review_drawer {
+                            drawer.submitting = false;
+                            drawer.error = Some(format!("{err}"));
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn discard_pending_review(&mut self, cx: &mut Context<Self>) {
+        let Some(review_id) = self
+            .review_state
+            .as_ref()
+            .and_then(|s| s.pending_review.as_ref().map(|r| r.id.clone()))
+        else {
+            return;
+        };
+        let client = self.client.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { client.delete_pending_review(&review_id) })
+                .await;
+            view.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.review_drawer = None;
+                        this.refresh(cx);
+                    }
+                    Err(err) => this.flash_error(format!("Couldn't discard review: {err}"), cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn merge(&mut self, method: MergeMethod, cx: &mut Context<Self>) {
+        if self.merging {
+            return;
+        }
+        self.merging = true;
+        cx.notify();
+        let client = self.client.clone();
+        let repo = self.pr.repo.clone();
+        let number = self.pr.number;
+        let sha = self.pr.head_sha.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { client.merge_pr(&repo, number, method, &sha) })
+                .await;
+            view.update(cx, |this, cx| {
+                this.merging = false;
+                match result {
+                    Ok(()) => this.refresh(cx),
+                    Err(err) => this.flash_error(format!("Merge failed: {err}"), cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn flash_error(&mut self, message: String, cx: &mut Context<Self>) {
-        // For now surface transient errors via the checkout/error channel by
-        // logging; a toast layer arrives with the notification work in M5.
+        // For now surface transient errors via stderr; a toast layer is a
+        // polish item. Kept as a single channel so callers stay uniform.
         eprintln!("prdesk: {message}");
         cx.notify();
     }
@@ -515,26 +674,131 @@ impl PrSessionView {
             );
         }
 
+        let is_new_comment = matches!(composer.target, ComposerTarget::NewComment(_));
+        let has_pending = self
+            .review_state
+            .as_ref()
+            .is_some_and(|s| s.pending_review.is_some());
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .justify_end()
+            .child(
+                Button::new("composer-cancel")
+                    .label("Cancel")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_composer(cx))),
+            );
+        // New comments can be batched into a pending review; replies post now.
+        if is_new_comment {
+            actions = actions.child(
+                Button::new("composer-add-review")
+                    .label(if has_pending { "Add to review" } else { "Start a review" })
+                    .ghost()
+                    .small()
+                    .disabled(sending)
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_composer(true, cx))),
+            );
+        }
+        panel.child(
+            actions.child(
+                Button::new("composer-send")
+                    .label(if sending { "Sending…" } else { send_label })
+                    .primary()
+                    .small()
+                    .disabled(sending)
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_composer(false, cx))),
+            ),
+        )
+    }
+
+    fn render_review_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let drawer = self.review_drawer.as_ref().expect("drawer present");
+        let submitting = drawer.submitting;
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Finish your review"),
+            )
+            .child(
+                div()
+                    .h(px(64.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(Input::new(&drawer.summary).h_full()),
+            );
+        if let Some(err) = &drawer.error {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xf85149))
+                    .child(SharedString::from(err.clone())),
+            );
+        }
         panel.child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .justify_end()
                 .child(
-                    Button::new("composer-cancel")
+                    Button::new("review-discard")
+                        .label("Discard review")
+                        .ghost()
+                        .small()
+                        .disabled(submitting)
+                        .on_click(cx.listener(|this, _, _, cx| this.discard_pending_review(cx))),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new("review-cancel")
                         .label("Cancel")
                         .ghost()
                         .small()
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_composer(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.review_drawer = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    Button::new("composer-send")
-                        .label(if sending { "Sending…" } else { send_label })
+                    Button::new("review-comment")
+                        .label("Comment")
+                        .ghost()
+                        .small()
+                        .disabled(submitting)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.submit_review(ReviewVerdict::Comment, cx)
+                        })),
+                )
+                .child(
+                    Button::new("review-request-changes")
+                        .label("Request changes")
+                        .ghost()
+                        .small()
+                        .disabled(submitting)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.submit_review(ReviewVerdict::RequestChanges, cx)
+                        })),
+                )
+                .child(
+                    Button::new("review-approve")
+                        .label(if submitting { "Submitting…" } else { "Approve" })
                         .primary()
                         .small()
-                        .disabled(sending)
-                        .on_click(cx.listener(|this, _, _, cx| this.submit_composer(cx))),
+                        .disabled(submitting)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.submit_review(ReviewVerdict::Approve, cx)
+                        })),
                 ),
         )
     }
@@ -543,7 +807,7 @@ impl PrSessionView {
         let url = self.pr.url.clone();
         let thread_count = self.threads.len();
         let unresolved = self.threads.iter().filter(|t| !t.is_resolved).count();
-        div()
+        let mut header = div()
             .flex()
             .items_center()
             .gap_2()
@@ -593,14 +857,55 @@ impl PrSessionView {
                     .ghost()
                     .xsmall()
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-            )
-            .child(
-                Button::new("open-browser")
-                    .label("Open on GitHub")
-                    .ghost()
+            );
+
+        // Finish-review button appears once a pending review has drafts.
+        let pending_count = self
+            .review_state
+            .as_ref()
+            .and_then(|s| s.pending_review.as_ref())
+            .map(|_| {
+                self.threads
+                    .iter()
+                    .flat_map(|t| &t.comments)
+                    .filter(|c| c.is_pending)
+                    .count()
+            });
+        if let Some(count) = pending_count {
+            header = header.child(
+                Button::new("finish-review")
+                    .label(format!("Finish review ({count})"))
+                    .primary()
                     .xsmall()
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_review_drawer(window, cx)
+                    })),
+            );
+        }
+
+        // Merge appears when GitHub reports the PR mergeable.
+        let mergeable = self
+            .review_state
+            .as_ref()
+            .is_some_and(|s| !s.merged && s.mergeable == MergeableState::Mergeable);
+        if mergeable {
+            header = header.child(
+                Button::new("merge-squash")
+                    .label(if self.merging { "Merging…" } else { "Squash & merge" })
+                    .primary()
+                    .xsmall()
+                    .disabled(self.merging)
+                    .on_click(cx.listener(|this, _, _, cx| this.merge(MergeMethod::Squash, cx))),
+            );
+        }
+
+        header.child(
+            Button::new("open-browser")
+                .label("Open on GitHub")
+                .ghost()
+                .xsmall()
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        )
     }
 
     fn render_checkout_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1210,13 +1515,16 @@ fn fetch_diff(client: &GithubClient, pr: &PrSummary) -> Result<LoadedDiff, Strin
     let threads = client
         .pr_review_threads(&pr.repo, pr.number)
         .map_err(|e| e.to_string())?;
+    // The review/merge state is best-effort: a failure here shouldn't block
+    // reading the diff.
+    let review_state = client.pr_review_state(&pr.repo, pr.number).ok();
     let mut files = Vec::with_capacity(pr_files.len());
     let mut stats = Vec::with_capacity(pr_files.len());
     for f in &pr_files {
         files.push(diff_kit::file_diff_from_pr_file(f).map_err(|e| format!("{}: {e}", f.path))?);
         stats.push((f.additions, f.deletions));
     }
-    Ok(LoadedDiff { files, stats, threads })
+    Ok(LoadedDiff { files, stats, threads, review_state })
 }
 
 impl gpui::EventEmitter<SessionEvent> for PrSessionView {}
@@ -1313,7 +1621,9 @@ impl Render for PrSessionView {
             .child(self.render_header(cx))
             .child(self.render_checkout_bar(cx))
             .child(body);
-        if self.composer.is_some() {
+        if self.review_drawer.is_some() {
+            root = root.child(self.render_review_drawer(cx));
+        } else if self.composer.is_some() {
             root = root.child(self.render_composer(cx));
         }
         root
