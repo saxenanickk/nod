@@ -3,7 +3,10 @@
 
 use crate::config::{self, Config};
 use crate::util::relative_time;
-use diff_kit::{DiffLine, DiffRow, FileDiff, FileStatus, LayoutOptions, layout_unified};
+use diff_kit::{
+    DiffLine, DiffRow, FileDiff, FileStatus, HalfKind, HalfRow, LayoutOptions, SplitRow,
+    layout_split, layout_unified,
+};
 use github_client::GithubClient;
 use github_types::{
     CommentAnchor, DiffSide, MergeMethod, MergeableState, NodeId, PrReviewState, PrSummary,
@@ -39,6 +42,12 @@ gpui::actions!(
 
 /// The key context the session's bindings are scoped to (see main.rs).
 pub const SESSION_KEY_CONTEXT: &str = "PrSession";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Unified,
+    Split,
+}
 
 enum SessionLoad {
     Loading,
@@ -110,7 +119,9 @@ pub struct PrSessionView {
     /// thread node id → index into `threads`.
     thread_ix: HashMap<String, usize>,
     rows: Vec<DiffRow>,
-    /// file_ix → index of its `FileHeader` row.
+    split_rows: Vec<SplitRow>,
+    view_mode: ViewMode,
+    /// file_ix → index of its `FileHeader` row (for the active view mode).
     header_rows: Vec<usize>,
     show_resolved: bool,
     /// Resolved threads the user expanded back open.
@@ -152,6 +163,8 @@ impl PrSessionView {
             threads: Vec::new(),
             thread_ix: HashMap::new(),
             rows: Vec::new(),
+            split_rows: Vec::new(),
+            view_mode: ViewMode::Unified,
             header_rows: Vec::new(),
             show_resolved: true,
             expanded: HashSet::new(),
@@ -296,32 +309,59 @@ impl PrSessionView {
         cx.notify();
     }
 
-    /// Recomputes the row list from stored files/threads and current options.
+    /// Recomputes both row lists from stored files/threads and current
+    /// options, then refreshes the list length for the active view.
     fn relayout(&mut self) {
         let opts = LayoutOptions {
             show_resolved: self.show_resolved,
             show_outdated: true,
         };
         self.rows = layout_unified(&self.files, &self.threads, opts);
+        self.split_rows = layout_split(&self.files, &self.threads, opts);
+        self.recompute_header_rows();
+        self.list_state.reset(self.active_len());
+    }
+
+    fn active_len(&self) -> usize {
+        match self.view_mode {
+            ViewMode::Unified => self.rows.len(),
+            ViewMode::Split => self.split_rows.len(),
+        }
+    }
+
+    fn recompute_header_rows(&mut self) {
         self.header_rows = self
             .files
             .iter()
             .enumerate()
-            .map(|(file_ix, _)| {
-                self.rows
+            .map(|(file_ix, _)| match self.view_mode {
+                ViewMode::Unified => self
+                    .rows
                     .iter()
-                    .position(
-                        |r| matches!(r, DiffRow::FileHeader { file_ix: fx } if *fx == file_ix),
-                    )
-                    .unwrap_or(0)
+                    .position(|r| matches!(r, DiffRow::FileHeader { file_ix: fx } if *fx == file_ix))
+                    .unwrap_or(0),
+                ViewMode::Split => self
+                    .split_rows
+                    .iter()
+                    .position(|r| matches!(r, SplitRow::FileHeader { file_ix: fx } if *fx == file_ix))
+                    .unwrap_or(0),
             })
             .collect();
-        self.list_state.reset(self.rows.len());
     }
 
     fn toggle_resolved(&mut self, cx: &mut Context<Self>) {
         self.show_resolved = !self.show_resolved;
         self.relayout();
+        cx.notify();
+    }
+
+    fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Unified => ViewMode::Split,
+            ViewMode::Split => ViewMode::Unified,
+        };
+        self.recompute_header_rows();
+        self.list_state.reset(self.active_len());
         cx.notify();
     }
 
@@ -359,15 +399,26 @@ impl PrSessionView {
     }
 
     fn step_thread(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let thread_rows: Vec<usize> = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                matches!(r, DiffRow::Thread { .. } | DiffRow::OutdatedThread { .. })
-            })
-            .map(|(ix, _)| ix)
-            .collect();
+        let thread_rows: Vec<usize> = match self.view_mode {
+            ViewMode::Unified => self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    matches!(r, DiffRow::Thread { .. } | DiffRow::OutdatedThread { .. })
+                })
+                .map(|(ix, _)| ix)
+                .collect(),
+            ViewMode::Split => self
+                .split_rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    matches!(r, SplitRow::Thread { .. } | SplitRow::OutdatedThread { .. })
+                })
+                .map(|(ix, _)| ix)
+                .collect(),
+        };
         if thread_rows.is_empty() {
             return;
         }
@@ -901,6 +952,16 @@ impl PrSessionView {
                 )
             })
             .child(
+                Button::new("toggle-view")
+                    .label(match self.view_mode {
+                        ViewMode::Unified => "Split",
+                        ViewMode::Split => "Unified",
+                    })
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_view_mode(cx))),
+            )
+            .child(
                 Button::new("toggle-resolved")
                     .label(if self.show_resolved {
                         "Hide resolved"
@@ -1135,6 +1196,67 @@ impl PrSessionView {
             .into_any_element()
     }
 
+    fn render_file_header(&self, file_ix: usize, ix: usize, cx: &App) -> gpui::AnyElement {
+        let Some(file) = self.files.get(file_ix) else {
+            return div().into_any_element();
+        };
+        let label = match (&file.old_path, file.is_binary_or_too_large) {
+            (Some(old), _) => format!("{} → {}", old, file.path),
+            (None, true) => format!("{} (no preview: binary or too large)", file.path),
+            (None, false) => file.path.clone(),
+        };
+        let mut header = div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .flex()
+            .items_center()
+            .bg(cx.theme().secondary)
+            .px_3()
+            .gap_2()
+            .font_weight(gpui::FontWeight::BOLD)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(label)),
+            );
+        if let Some((clone_path, _)) = self.zed_target() {
+            let file_path = clone_path.join(&file.path);
+            header = header.child(
+                Button::new(("open-zed", ix))
+                    .label("Open in Zed")
+                    .ghost()
+                    .xsmall()
+                    .on_click(move |_, _, _| {
+                        let _ = zed_bridge::open_in_zed(&file_path, None);
+                    }),
+            );
+        }
+        header.into_any_element()
+    }
+
+    fn render_hunk_header(&self, file_ix: usize, hunk_ix: usize, cx: &App) -> gpui::AnyElement {
+        let header = self
+            .files
+            .get(file_ix)
+            .and_then(|f| f.hunks.get(hunk_ix))
+            .map(|h| h.header.clone())
+            .unwrap_or_default();
+        div()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .flex()
+            .items_center()
+            .px_3()
+            .font_family(MONO)
+            .text_sm()
+            .text_color(rgb(0x6a9fb5))
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(SharedString::from(header))
+            .into_any_element()
+    }
+
     fn render_diff_row(
         &self,
         ix: usize,
@@ -1144,57 +1266,10 @@ impl PrSessionView {
         let Some(row) = self.rows.get(ix) else {
             return div().into_any_element();
         };
-        let base = div().h(px(ROW_HEIGHT)).w_full().flex().items_center();
         match row {
-            DiffRow::FileHeader { file_ix } => {
-                let Some(file) = self.files.get(*file_ix) else {
-                    return div().into_any_element();
-                };
-                let label = match (&file.old_path, file.is_binary_or_too_large) {
-                    (Some(old), _) => format!("{} → {}", old, file.path),
-                    (None, true) => format!("{} (no preview: binary or too large)", file.path),
-                    (None, false) => file.path.clone(),
-                };
-                let mut header = base
-                    .bg(cx.theme().secondary)
-                    .px_3()
-                    .gap_2()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(label)),
-                    );
-                if let Some((clone_path, _)) = self.zed_target() {
-                    let file_path = clone_path.join(&file.path);
-                    header = header.child(
-                        Button::new(("open-zed", ix))
-                            .label("Open in Zed")
-                            .ghost()
-                            .xsmall()
-                            .on_click(move |_, _, _| {
-                                let _ = zed_bridge::open_in_zed(&file_path, None);
-                            }),
-                    );
-                }
-                header.into_any_element()
-            }
+            DiffRow::FileHeader { file_ix } => self.render_file_header(*file_ix, ix, cx),
             DiffRow::HunkHeader { file_ix, hunk_ix } => {
-                let header = self
-                    .files
-                    .get(*file_ix)
-                    .and_then(|f| f.hunks.get(*hunk_ix))
-                    .map(|h| h.header.clone())
-                    .unwrap_or_default();
-                base.px_3()
-                    .font_family(MONO)
-                    .text_sm()
-                    .text_color(rgb(0x6a9fb5))
-                    .bg(cx.theme().secondary.opacity(0.5))
-                    .child(SharedString::from(header))
-                    .into_any_element()
+                self.render_hunk_header(*file_ix, *hunk_ix, cx)
             }
             DiffRow::Line { line, in_comment_range, file_ix } => {
                 // ⌘-click opens the line in Zed once the clone sits on the
@@ -1221,17 +1296,7 @@ impl PrSessionView {
                 };
                 render_thread_card(thread, ix, false, &self.expanded, entity, cx)
             }
-            DiffRow::OutdatedThreadsHeader { count, .. } => div()
-                .w_full()
-                .px_3()
-                .py_1()
-                .text_sm()
-                .text_color(rgb(0xd29922))
-                .child(SharedString::from(format!(
-                    "⚠ {count} outdated thread{} (code has changed since)",
-                    if *count == 1 { "" } else { "s" }
-                )))
-                .into_any_element(),
+            DiffRow::OutdatedThreadsHeader { count, .. } => outdated_header_el(*count),
             DiffRow::OutdatedThread { thread_id } => {
                 let Some(thread) = self.thread(thread_id) else {
                     return div().into_any_element();
@@ -1240,6 +1305,174 @@ impl PrSessionView {
             }
         }
     }
+
+    fn render_split_row(
+        &self,
+        ix: usize,
+        entity: &Entity<Self>,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let Some(row) = self.split_rows.get(ix) else {
+            return div().into_any_element();
+        };
+        match row {
+            SplitRow::FileHeader { file_ix } => self.render_file_header(*file_ix, ix, cx),
+            SplitRow::HunkHeader { file_ix, hunk_ix } => {
+                self.render_hunk_header(*file_ix, *hunk_ix, cx)
+            }
+            SplitRow::Pair { file_ix, left, right, in_comment_range } => {
+                let lang = self.files.get(*file_ix).and_then(|f| syntax::lang_for_path(&f.path));
+                let path = self.files.get(*file_ix).map(|f| f.path.clone());
+                // ⌘-click on the right (head) column jumps to Zed.
+                let zed_base = self.zed_target().filter(|(_, on_pr)| *on_pr).map(|(c, _)| c);
+                let mut container = div().w_full().flex().items_center();
+                if *in_comment_range {
+                    container = container.border_l_2().border_color(rgb(0xd29922));
+                }
+                container
+                    .child(render_half(
+                        left.as_ref(),
+                        lang,
+                        ("half-l", ix),
+                        None,
+                        None,
+                        entity,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .w(px(1.))
+                            .h(px(ROW_HEIGHT))
+                            .bg(cx.theme().border)
+                            .flex_shrink_0(),
+                    )
+                    .child(render_half(
+                        right.as_ref(),
+                        lang,
+                        ("half-r", ix),
+                        path.clone().map(|p| CommentAnchor {
+                            path: p,
+                            side: DiffSide::Right,
+                            line: right.as_ref().map(|h| h.line_no).unwrap_or(0),
+                            start_line: None,
+                            start_side: None,
+                        }),
+                        zed_base.zip(path).map(|(clone, p)| {
+                            (clone.join(&p), right.as_ref().map(|h| h.line_no))
+                        }),
+                        entity,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+            SplitRow::Thread { thread_id } => {
+                let Some(thread) = self.thread(thread_id) else {
+                    return div().into_any_element();
+                };
+                render_thread_card(thread, ix, false, &self.expanded, entity, cx)
+            }
+            SplitRow::OutdatedThreadsHeader { count, .. } => outdated_header_el(*count),
+            SplitRow::OutdatedThread { thread_id } => {
+                let Some(thread) = self.thread(thread_id) else {
+                    return div().into_any_element();
+                };
+                render_thread_card(thread, ix, true, &self.expanded, entity, cx)
+            }
+        }
+    }
+}
+
+fn outdated_header_el(count: usize) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .px_3()
+        .py_1()
+        .text_sm()
+        .text_color(rgb(0xd29922))
+        .child(SharedString::from(format!(
+            "⚠ {count} outdated thread{} (code has changed since)",
+            if count == 1 { "" } else { "s" }
+        )))
+        .into_any_element()
+}
+
+/// One column of a side-by-side pair. `anchor`/`zed` enable commenting and
+/// ⌘-click-to-Zed on that half when present.
+fn render_half(
+    half: Option<&HalfRow>,
+    lang: Option<syntax::Lang>,
+    id: (&'static str, usize),
+    anchor: Option<CommentAnchor>,
+    zed: Option<(PathBuf, Option<u32>)>,
+    entity: &Entity<PrSessionView>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let Some(half) = half else {
+        // Empty half (pure add/delete on the other side).
+        return div()
+            .w_1_2()
+            .h(px(ROW_HEIGHT))
+            .flex_shrink_0()
+            .bg(cx.theme().secondary.opacity(0.25))
+            .into_any_element();
+    };
+    let bg = match half.kind {
+        HalfKind::Added => Some(gpui::Hsla::from(rgb(0x2ea043)).opacity(0.13)),
+        HalfKind::Removed => Some(gpui::Hsla::from(rgb(0xf85149)).opacity(0.13)),
+        HalfKind::Context => None,
+    };
+    let group_name = SharedString::from(format!("{}-{}", id.0, id.1));
+    let mut cell = div()
+        .id(id)
+        .group(group_name.clone())
+        .w_1_2()
+        .h(px(ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .font_family(MONO)
+        .text_sm();
+    if let Some(bg) = bg {
+        cell = cell.bg(bg);
+    }
+    if let Some((path, line_no)) = zed {
+        cell = cell.on_click(move |event: &gpui::ClickEvent, _, _| {
+            if event.modifiers().platform {
+                let _ = zed_bridge::open_in_zed(&path, line_no);
+            }
+        });
+    }
+    let add = {
+        let mut c = div().w(px(16.)).flex_shrink_0().flex().justify_center();
+        if let Some(anchor) = anchor {
+            let entity = entity.clone();
+            c = c.child(
+                div()
+                    .id((id.0, id.1 + 1_000_000))
+                    .invisible()
+                    .group_hover(group_name.clone(), |s| s.visible())
+                    .text_color(rgb(0x539bf5))
+                    .cursor_pointer()
+                    .child("+")
+                    .on_click(move |_, window, cx| {
+                        let anchor = anchor.clone();
+                        entity.update(cx, |this, cx| this.open_new_comment(anchor, window, cx));
+                    }),
+            );
+        }
+        c
+    };
+    cell.child(add)
+        .child(
+            div()
+                .w(px(40.))
+                .flex_shrink_0()
+                .text_right()
+                .pr_1()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(half.line_no.to_string())),
+        )
+        .child(code_cell(&half.text, lang, cx))
+        .into_any_element()
 }
 
 /// The anchor a new comment on `line` would use.
@@ -1773,7 +2006,10 @@ impl Render for PrSessionView {
                             list(self.list_state.clone(), move |ix, _window, cx| {
                                 let entity = row_entity.clone();
                                 let this = entity.read(cx);
-                                this.render_diff_row(ix, &row_entity, cx)
+                                match this.view_mode {
+                                    ViewMode::Unified => this.render_diff_row(ix, &row_entity, cx),
+                                    ViewMode::Split => this.render_split_row(ix, &row_entity, cx),
+                                }
                             })
                             .size_full(),
                         ),

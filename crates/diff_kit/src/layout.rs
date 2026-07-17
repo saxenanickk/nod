@@ -4,6 +4,7 @@
 use crate::{DiffLine, FileDiff};
 use github_types::{DiffSide, NodeId, ReviewThread};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffRow {
@@ -132,6 +133,177 @@ pub fn layout_unified(
                         rows.extend(
                             list.into_iter()
                                 .map(|t| DiffRow::Thread { thread_id: t.id.clone() }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    rows
+}
+
+// ---- side-by-side layout ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HalfKind {
+    Context,
+    Added,
+    Removed,
+}
+
+/// One cell in a side-by-side row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HalfRow {
+    pub line_no: u32,
+    pub text: Arc<str>,
+    pub kind: HalfKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SplitRow {
+    FileHeader { file_ix: usize },
+    HunkHeader { file_ix: usize, hunk_ix: usize },
+    /// A paired row: `left` is the base side, `right` the head side. Either
+    /// may be `None` (a pure add or delete).
+    Pair {
+        file_ix: usize,
+        left: Option<HalfRow>,
+        right: Option<HalfRow>,
+        in_comment_range: bool,
+    },
+    Thread { thread_id: NodeId },
+    OutdatedThreadsHeader { file_ix: usize, count: usize },
+    OutdatedThread { thread_id: NodeId },
+}
+
+/// Partitions a file's threads into live (keyed by anchor) and outdated, and
+/// computes the highlighted comment ranges. Shared by both layouts.
+fn partition_threads<'a>(
+    file: &FileDiff,
+    file_threads: Vec<&'a ReviewThread>,
+) -> (
+    HashMap<(DiffSide, u32), Vec<&'a ReviewThread>>,
+    Vec<&'a ReviewThread>,
+    Vec<(DiffSide, u32, u32)>,
+) {
+    let addressable: std::collections::HashSet<(DiffSide, u32)> = file
+        .hunks
+        .iter()
+        .flat_map(|h| h.lines.iter())
+        .flat_map(line_anchor)
+        .collect();
+    let mut anchored: HashMap<(DiffSide, u32), Vec<&ReviewThread>> = HashMap::new();
+    let mut outdated: Vec<&ReviewThread> = Vec::new();
+    for thread in file_threads {
+        match thread.line {
+            Some(line) if !thread.is_outdated && addressable.contains(&(thread.side, line)) => {
+                anchored.entry((thread.side, line)).or_default().push(thread);
+            }
+            _ => outdated.push(thread),
+        }
+    }
+    let ranges: Vec<(DiffSide, u32, u32)> = anchored
+        .values()
+        .flatten()
+        .filter_map(|t| {
+            Some((t.start_side.unwrap_or(t.side), t.start_line?, t.line?))
+        })
+        .collect();
+    (anchored, outdated, ranges)
+}
+
+fn in_range(side: DiffSide, line: u32, ranges: &[(DiffSide, u32, u32)]) -> bool {
+    ranges
+        .iter()
+        .any(|(rside, start, end)| *rside == side && (*start..=*end).contains(&line))
+}
+
+/// Side-by-side layout. Same thread rules as [`layout_unified`]; threads and
+/// outdated groups span the full width beneath their anchor pair.
+pub fn layout_split(
+    files: &[FileDiff],
+    threads: &[ReviewThread],
+    opts: LayoutOptions,
+) -> Vec<SplitRow> {
+    let mut rows = Vec::new();
+    let mut by_path: HashMap<&str, Vec<&ReviewThread>> = HashMap::new();
+    for thread in threads {
+        if !opts.show_resolved && thread.is_resolved {
+            continue;
+        }
+        by_path.entry(thread.path.as_str()).or_default().push(thread);
+    }
+
+    for (file_ix, file) in files.iter().enumerate() {
+        let file_threads = by_path.remove(file.path.as_str()).unwrap_or_default();
+        let (mut anchored, outdated, ranges) = partition_threads(file, file_threads);
+
+        rows.push(SplitRow::FileHeader { file_ix });
+        if opts.show_outdated && !outdated.is_empty() {
+            rows.push(SplitRow::OutdatedThreadsHeader { file_ix, count: outdated.len() });
+            for thread in &outdated {
+                rows.push(SplitRow::OutdatedThread { thread_id: thread.id.clone() });
+            }
+        }
+
+        for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+            rows.push(SplitRow::HunkHeader { file_ix, hunk_ix });
+
+            // Build paired rows: context aligns both sides; runs of removed
+            // then added lines zip together, with leftovers on one side.
+            let mut pairs: Vec<(Option<HalfRow>, Option<HalfRow>)> = Vec::new();
+            let mut rem: Vec<HalfRow> = Vec::new();
+            let mut add: Vec<HalfRow> = Vec::new();
+            let flush = |rem: &mut Vec<HalfRow>,
+                         add: &mut Vec<HalfRow>,
+                         pairs: &mut Vec<(Option<HalfRow>, Option<HalfRow>)>| {
+                let n = rem.len().max(add.len());
+                for i in 0..n {
+                    pairs.push((rem.get(i).cloned(), add.get(i).cloned()));
+                }
+                rem.clear();
+                add.clear();
+            };
+            for line in &hunk.lines {
+                match line {
+                    DiffLine::Context { old, new, text } => {
+                        flush(&mut rem, &mut add, &mut pairs);
+                        pairs.push((
+                            Some(HalfRow { line_no: *old, text: text.clone(), kind: HalfKind::Context }),
+                            Some(HalfRow { line_no: *new, text: text.clone(), kind: HalfKind::Context }),
+                        ));
+                    }
+                    DiffLine::Removed { old, text } => {
+                        rem.push(HalfRow { line_no: *old, text: text.clone(), kind: HalfKind::Removed });
+                    }
+                    DiffLine::Added { new, text } => {
+                        add.push(HalfRow { line_no: *new, text: text.clone(), kind: HalfKind::Added });
+                    }
+                }
+            }
+            flush(&mut rem, &mut add, &mut pairs);
+
+            for (left, right) in pairs {
+                let in_comment_range = left
+                    .as_ref()
+                    .is_some_and(|h| in_range(DiffSide::Left, h.line_no, &ranges))
+                    || right
+                        .as_ref()
+                        .is_some_and(|h| in_range(DiffSide::Right, h.line_no, &ranges));
+                // Anchor keys this pair covers.
+                let mut keys = Vec::new();
+                if let Some(h) = &left {
+                    keys.push((DiffSide::Left, h.line_no));
+                }
+                if let Some(h) = &right {
+                    keys.push((DiffSide::Right, h.line_no));
+                }
+                rows.push(SplitRow::Pair { file_ix, left, right, in_comment_range });
+                for key in keys {
+                    if let Some(list) = anchored.remove(&key) {
+                        rows.extend(
+                            list.into_iter()
+                                .map(|t| SplitRow::Thread { thread_id: t.id.clone() }),
                         );
                     }
                 }
@@ -301,5 +473,56 @@ mod tests {
         };
         let rows = layout_unified(&[f], &[], LayoutOptions::default());
         assert_eq!(row_kinds(&rows), ["file"]);
+    }
+
+    #[test]
+    fn split_pairs_context_and_zips_changes() {
+        let files = [file("src/a.rs", PATCH)];
+        let rows = layout_split(&files, &[], LayoutOptions::default());
+        // Collect just the pairs.
+        let pairs: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SplitRow::Pair { left, right, .. } => Some((left.clone(), right.clone())),
+                _ => None,
+            })
+            .collect();
+        // context one → both sides; removed two zipped with added two;
+        // added three → right only; context last → both sides.
+        assert_eq!(pairs.len(), 4);
+        // First is context on both sides.
+        assert!(matches!(&pairs[0], (Some(l), Some(r))
+            if l.kind == HalfKind::Context && r.kind == HalfKind::Context));
+        // Second: removed (left) paired with added (right).
+        assert!(matches!(&pairs[1], (Some(l), Some(r))
+            if l.kind == HalfKind::Removed && r.kind == HalfKind::Added));
+        // Third: pure add, left empty.
+        assert!(matches!(&pairs[2], (None, Some(r)) if r.kind == HalfKind::Added));
+        // Fourth: context again.
+        assert!(matches!(&pairs[3], (Some(_), Some(_))));
+    }
+
+    #[test]
+    fn split_places_thread_after_anchor_pair() {
+        let files = [file("src/a.rs", PATCH)];
+        // Anchor on Right line 3 ("added three").
+        let threads = [thread("t1", "src/a.rs", DiffSide::Right, Some(3))];
+        let rows = layout_split(&files, &threads, LayoutOptions::default());
+        let thread_pos = rows
+            .iter()
+            .position(|r| matches!(r, SplitRow::Thread { .. }))
+            .expect("thread present");
+        // The row before it is the pair whose right line is 3.
+        assert!(matches!(&rows[thread_pos - 1], SplitRow::Pair { right: Some(h), .. }
+            if h.line_no == 3));
+    }
+
+    #[test]
+    fn split_groups_outdated() {
+        let files = [file("src/a.rs", PATCH)];
+        let mut gone = thread("t1", "src/a.rs", DiffSide::Right, None);
+        gone.is_outdated = true;
+        let rows = layout_split(&files, &[gone], LayoutOptions::default());
+        assert!(matches!(rows[1], SplitRow::OutdatedThreadsHeader { count: 1, .. }));
     }
 }

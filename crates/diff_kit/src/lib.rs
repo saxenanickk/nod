@@ -4,7 +4,9 @@
 mod layout;
 mod parse;
 
-pub use layout::{DiffRow, LayoutOptions, layout_unified};
+pub use layout::{
+    DiffRow, HalfKind, HalfRow, LayoutOptions, SplitRow, layout_split, layout_unified,
+};
 pub use parse::{PatchParseError, parse_patch};
 
 use std::sync::Arc;

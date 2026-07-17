@@ -52,6 +52,9 @@ In an open PR:
 | `esc` | Close the composer/review drawer, else go back |
 | `cmd-q` | Quit |
 
+Use the **Split** / **Unified** button in the PR header to switch between a
+side-by-side and an inline diff.
+
 ## Development
 
 ```sh
