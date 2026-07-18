@@ -1,15 +1,22 @@
-# prdesk
+<img src="assets/icon-1024.png" width="96" alt="Nod" align="left" />
+
+# Nod
 
 A fast, native GitHub pull-request review app for people who edit in [Zed](https://zed.dev).
 
+<br clear="left" />
+
 Zed's extension API has no UI extension points, so a VS Code-style PR review
-experience can't live inside Zed today. prdesk is the next best thing: a
+experience can't live inside Zed today. Nod is the next best thing: a
 standalone [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)
 app you keep next to Zed —
 
 - see the PRs waiting on you, check one out locally with one click,
 - read the diff with review comment threads inline,
 - comment, reply, resolve, approve/request changes, merge,
+- browse changed files as a **folder tree** and tick them off as **reviewed**
+  (synced with GitHub's per-file viewed state, so it matches github.com and the
+  VS Code PR extension),
 - review a **local repository's** diff (branch-vs-base or uncommitted) with no
   PR involved, and
 - jump from any diff line straight into Zed (`zed file:line`) with full LSP.
@@ -29,7 +36,7 @@ The top nav switches between:
   uncommitted changes — toggle in the header) and **View PRs** (the PR queue
   scoped to that repo).
 
-Or open a local review straight from the shell: `prdesk ~/path/to/repo`.
+Or open a local review straight from the shell: `nod ~/path/to/repo`.
 
 ## Requirements
 
@@ -39,7 +46,7 @@ Or open a local review straight from the shell: `prdesk ~/path/to/repo`.
 
 ## Configuration
 
-`~/Library/Application Support/prdesk/config.json` (created on first run):
+`~/Library/Application Support/nod/config.json` (created on first run):
 
 ```json
 {
@@ -67,8 +74,8 @@ In an open PR:
 | `esc` | Close the composer/review drawer, else go back |
 | `cmd-q` | Quit |
 
-Use the **Split** / **Unified** button in the PR header to switch between a
-side-by-side and an inline diff.
+Use the header toggles to switch between a side-by-side (**Split**) and inline
+(**Unified**) diff, and **Wrap** to soft-wrap long lines.
 
 ## Development
 
@@ -77,13 +84,16 @@ cargo run          # the app
 cargo test         # domain-crate tests
 ```
 
-Workspace rule: only the `prdesk` crate may depend on gpui/gpui-component
-(`cargo tree -i gpui` must show a single crate). Everything below it —
-`github_types`, `github_client`, `diff_kit`, `review_store` — stays UI-free.
+Workspace rule: only the `nod` crate may depend on gpui/gpui-component
+(`cargo tree -i gpui` must show a single crate, enforced by
+`scripts/check-gpui-isolation.sh`). Everything below it — `github_types`,
+`github_client`, `diff_kit`, `review_store` — stays UI-free.
 
 ### Packaging a macOS `.app`
 
 ```sh
-cargo install cargo-bundle
-cargo bundle --release --package prdesk
+./scripts/bundle-macos.sh
 ```
+
+Renders the app icon at every size, packs `assets/nod.icns`, builds the release
+binary, and assembles `dist/nod.app` — drag it to `/Applications`.

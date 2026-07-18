@@ -2,11 +2,11 @@
 
 ## Context
 
-prdesk today reviews GitHub PRs only: you land on a global PR queue, open one,
+nod today reviews GitHub PRs only: you land on a global PR queue, open one,
 and review its diff with inline threads. This adds the ability to **open any
 local repository** and either review its local changes (no PR) or jump to that
 repo's PRs. It removes the need to already have a PR to look at a diff in the
-app, and turns prdesk into a pre-push self-review tool as well as a PR review
+app, and turns nod into a pre-push self-review tool as well as a PR review
 tool.
 
 ## Goals
@@ -42,7 +42,7 @@ and **Repos** (new). The Repos view is a `RepoPickerView` listing local clones:
 - An **"Open folder…"** button opens a native folder picker (GPUI
   `cx.prompt_for_paths`) for a clone not in the list.
 
-CLI: `prdesk <path>` opens that repo's local review directly (bypassing the
+CLI: `nod <path>` opens that repo's local review directly (bypassing the
 picker). A non-existent path prints an error and opens the normal window.
 
 ### Local review session
@@ -100,7 +100,7 @@ pub fn uncommitted_diff(clone: &Path) -> Result<String>;          // git diff HE
 
 All shell out to `git` via the existing helper, consistent with checkout.
 
-### `diff_pane` module (new, in `prdesk`)
+### `diff_pane` module (new, in `nod`)
 
 The shared diff rendering, lifted out of `PrSessionView`:
 
@@ -146,7 +146,7 @@ holds `pr_list`, an optional `pr_session`, an optional `local_session`, and a
 
 ## Isolation
 
-`parse_git_diff` and the `repo_local` helpers are UI-free. Only `prdesk`
+`parse_git_diff` and the `repo_local` helpers are UI-free. Only `nod`
 touches gpui (`diff_pane`, `LocalSessionView`, `RepoPickerView` all live in the
 app crate). `scripts/check-gpui-isolation.sh` continues to enforce this.
 
