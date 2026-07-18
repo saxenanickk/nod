@@ -24,7 +24,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            gh_user: Some("saxenanickk".to_string()),
+            // `None` → whichever account is active in `gh` (gh auth status).
+            gh_user: None,
             scope: String::new(),
             clones: HashMap::new(),
             clone_roots: std::env::home_dir().into_iter().collect(),

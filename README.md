@@ -50,15 +50,17 @@ Or open a local review straight from the shell: `nod ~/path/to/repo`.
 
 ```json
 {
-  "gh_user": "saxenanickk",
+  "gh_user": null,
   "scope": "org:your-org",
   "clones": { "owner/repo": "/path/to/local/clone" },
   "poll_seconds": 60
 }
 ```
 
-- `gh_user` — which gh account to act as (gh supports multiple); `null` uses
-  gh's active account.
+- `gh_user` — `null` (the default) uses whichever account is active in `gh`.
+  Set a login to pin a specific account (gh supports multiple). Either way,
+  local reviews of a repo auto-select whichever logged-in account can access
+  it.
 - `scope` — extra search qualifier for the PR list (`org:…` / `repo:…`);
   empty searches all of GitHub.
 
