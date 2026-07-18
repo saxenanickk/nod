@@ -1,0 +1,41 @@
+{
+  "repository": {
+    "pullRequest": {
+      "title": "Add differential updates",
+      "body": "This PR adds differential updates.",
+      "createdAt": "2026-07-01T09:00:00Z",
+      "author": { "login": "saxenanickk", "avatarUrl": "https://avatars.githubusercontent.com/u/24573714?v=4" },
+      "comments": {
+        "nodes": [
+          {
+            "body": "Can you add a test?",
+            "createdAt": "2026-07-02T10:00:00Z",
+            "author": { "login": "reviewer", "avatarUrl": null }
+          }
+        ]
+      },
+      "reviews": {
+        "nodes": [
+          {
+            "body": "",
+            "state": "COMMENTED",
+            "submittedAt": "2026-07-02T09:30:00Z",
+            "author": { "login": "reviewer", "avatarUrl": null }
+          },
+          {
+            "body": "Looks good now, thanks!",
+            "state": "APPROVED",
+            "submittedAt": "2026-07-03T11:00:00Z",
+            "author": { "login": "reviewer", "avatarUrl": null }
+          },
+          {
+            "body": "draft in progress",
+            "state": "PENDING",
+            "submittedAt": null,
+            "author": { "login": "saxenanickk", "avatarUrl": null }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -8,15 +8,16 @@ mod transport;
 pub use transport::{GhCliTransport, GithubTransport, TransportError};
 
 use github_types::{
-    CommentAnchor, DiffSide, MergeMethod, NodeId, PrFile, PrNumber, PrReviewState, PrSummary,
-    RepoId, ReviewThread, ReviewVerdict,
+    CommentAnchor, DiffSide, MergeMethod, NodeId, PrConversation, PrFile, PrNumber, PrReviewState,
+    PrSummary, RepoId, ReviewThread, ReviewVerdict,
 };
-use parse::{ExtraData, RestPrFile, SearchNode, SearchPrsData, ThreadsData};
+use parse::{ConversationData, ExtraData, RestPrFile, SearchNode, SearchPrsData, ThreadsData};
 use serde_json::json;
 use std::sync::Arc;
 
 const SEARCH_PRS: &str = include_str!("queries/search_prs.graphql");
 const PR_REVIEW_THREADS: &str = include_str!("queries/pr_review_threads.graphql");
+const PR_CONVERSATION: &str = include_str!("queries/pr_conversation.graphql");
 const PR_EXTRA: &str = include_str!("queries/pr_extra.graphql");
 const ADD_LINE_COMMENT: &str = include_str!("queries/add_line_comment.graphql");
 const REPLY_TO_THREAD: &str = include_str!("queries/reply_to_thread.graphql");
@@ -130,6 +131,34 @@ impl GithubClient {
                     .map_err(|e| TransportError::Other(format!("bad files response: {e}")))
             })
             .collect()
+    }
+
+    /// The PR's conversation timeline: description, issue comments, and
+    /// submitted review summaries (oldest first).
+    pub fn pr_conversation(
+        &self,
+        repo: &RepoId,
+        number: PrNumber,
+    ) -> Result<PrConversation, TransportError> {
+        let data = self.transport.graphql(
+            PR_CONVERSATION,
+            &json!({ "owner": repo.owner, "name": repo.name, "number": number.0 }),
+        )?;
+        let parsed: ConversationData = serde_json::from_value(data)
+            .map_err(|e| TransportError::Other(format!("bad conversation response: {e}")))?;
+        Ok(PrConversation::from(parsed.repository.pull_request))
+    }
+
+    /// Posts a general (non-line) comment on the PR conversation.
+    pub fn add_issue_comment(
+        &self,
+        repo: &RepoId,
+        number: PrNumber,
+        body: &str,
+    ) -> Result<(), TransportError> {
+        let path = format!("repos/{}/{}/issues/{}/comments", repo.owner, repo.name, number.0);
+        self.transport.rest("POST", &path, Some(&json!({ "body": body })))?;
+        Ok(())
     }
 
     /// All review threads of a PR, following reviewThreads pagination.

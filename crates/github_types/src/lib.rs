@@ -204,6 +204,33 @@ pub struct PendingReview {
     pub body: String,
 }
 
+/// One entry in a PR's conversation timeline (the "Conversation" tab):
+/// the description, general issue comments, and submitted review summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationItem {
+    pub author: Actor,
+    pub body_markdown: String,
+    pub created_at: DateTime<Utc>,
+    pub kind: ConversationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationKind {
+    /// The PR description (body of the pull request itself).
+    Description,
+    /// A general (non-line-anchored) comment on the PR.
+    Comment,
+    /// A submitted review's summary, carrying its verdict.
+    Review(ReviewVerdict),
+}
+
+/// A PR's conversation: title plus the timeline, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrConversation {
+    pub title: String,
+    pub items: Vec<ConversationItem>,
+}
+
 /// Live review/merge state fetched separately from the diff.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrReviewState {

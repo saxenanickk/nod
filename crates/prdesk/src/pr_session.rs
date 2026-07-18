@@ -9,8 +9,8 @@ use diff_kit::{
 };
 use github_client::GithubClient;
 use github_types::{
-    CommentAnchor, DiffSide, MergeMethod, MergeableState, NodeId, PrReviewState, PrSummary,
-    ReviewThread, ReviewVerdict,
+    CommentAnchor, ConversationKind, DiffSide, MergeMethod, MergeableState, NodeId, PrConversation,
+    PrReviewState, PrSummary, ReviewThread, ReviewVerdict,
 };
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -67,6 +67,7 @@ struct LoadedDiff {
     stats: Vec<(u64, u64)>,
     threads: Vec<ReviewThread>,
     review_state: Option<PrReviewState>,
+    conversation: Option<PrConversation>,
 }
 
 /// The finish-review drawer: a summary box + verdict choice.
@@ -128,6 +129,14 @@ pub struct PrSessionView {
     review_state: Option<PrReviewState>,
     review_drawer: Option<ReviewDrawer>,
     merging: bool,
+    /// PR conversation (description + comments + review summaries).
+    conversation: Option<PrConversation>,
+    /// The right-side conversation panel is open.
+    show_conversation: bool,
+    /// Composer for posting a conversation comment (created lazily).
+    conv_input: Option<Entity<InputState>>,
+    posting_comment: bool,
+    conv_error: Option<String>,
     /// Cursor into thread rows for n/p navigation.
     thread_nav: usize,
     generation: u64,
@@ -166,6 +175,11 @@ impl PrSessionView {
             review_state: None,
             review_drawer: None,
             merging: false,
+            conversation: None,
+            show_conversation: false,
+            conv_input: None,
+            posting_comment: false,
+            conv_error: None,
             thread_nav: 0,
             generation: 0,
             focus_handle: cx.focus_handle(),
@@ -285,6 +299,7 @@ impl PrSessionView {
                             .collect();
                         this.threads = loaded.threads;
                         this.review_state = loaded.review_state;
+                        this.conversation = loaded.conversation;
                         this.load = SessionLoad::Ready;
                         this.relayout();
                     }
@@ -713,6 +728,73 @@ impl PrSessionView {
         cx.notify();
     }
 
+    // ---- conversation panel ----
+
+    fn toggle_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_conversation = !self.show_conversation;
+        if self.show_conversation && self.conv_input.is_none() {
+            self.conv_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .multi_line(true)
+                    .placeholder("Comment on this pull request…")
+            }));
+        }
+        cx.notify();
+    }
+
+    fn post_conversation_comment(&mut self, cx: &mut Context<Self>) {
+        if self.posting_comment {
+            return;
+        }
+        let Some(input) = &self.conv_input else { return };
+        let body = input.read(cx).value().trim().to_string();
+        if body.is_empty() {
+            return;
+        }
+        self.posting_comment = true;
+        self.conv_error = None;
+        cx.notify();
+        let client = self.client.clone();
+        let repo = self.pr.repo.clone();
+        let number = self.pr.number;
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { client.add_issue_comment(&repo, number, &body) })
+                .await;
+            view.update(cx, |this, cx| {
+                this.posting_comment = false;
+                match result {
+                    Ok(()) => {
+                        // Clear the box and pull the updated timeline.
+                        this.conv_input = None;
+                        this.show_conversation = true;
+                        this.refresh(cx);
+                    }
+                    Err(err) => this.conv_error = Some(format!("{err}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Scrolls the diff to a thread's inline row.
+    fn jump_to_thread(&mut self, thread_id: &NodeId, cx: &mut Context<Self>) {
+        let target = match self.view_mode {
+            ViewMode::Unified => self.rows.iter().position(|r| {
+                matches!(r, DiffRow::Thread { thread_id: t } | DiffRow::OutdatedThread { thread_id: t } if t == thread_id)
+            }),
+            ViewMode::Split => self.split_rows.iter().position(|r| {
+                matches!(r, SplitRow::Thread { thread_id: t } | SplitRow::OutdatedThread { thread_id: t } if t == thread_id)
+            }),
+        };
+        if let Some(row_ix) = target {
+            self.list_state.scroll_to(ListOffset { item_ix: row_ix, offset_in_item: px(0.) });
+            cx.notify();
+        }
+    }
+
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let composer = self.composer.as_ref().expect("composer present");
         let (title, send_label) = match &composer.target {
@@ -903,6 +985,173 @@ impl PrSessionView {
         )
     }
 
+    /// The right-side conversation panel: the PR timeline (description, issue
+    /// comments, review summaries), a composer to post, and a jump-list of the
+    /// line-comment threads.
+    fn render_conversation_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut timeline = div().flex().flex_col().gap_2().p_3();
+        timeline = timeline.child(
+            div().font_weight(gpui::FontWeight::BOLD).child("Conversation"),
+        );
+        match &self.conversation {
+            None => {
+                timeline = timeline.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading conversation…"),
+                );
+            }
+            Some(conv) => {
+                for item in &conv.items {
+                    let (label, color) = match item.kind {
+                        ConversationKind::Description => ("described", rgb(0x8a8f98)),
+                        ConversationKind::Comment => ("commented", rgb(0x539bf5)),
+                        ConversationKind::Review(ReviewVerdict::Approve) => {
+                            ("approved", rgb(0x3fb950))
+                        }
+                        ConversationKind::Review(ReviewVerdict::RequestChanges) => {
+                            ("requested changes", rgb(0xf85149))
+                        }
+                        ConversationKind::Review(ReviewVerdict::Comment) => {
+                            ("reviewed", rgb(0x539bf5))
+                        }
+                    };
+                    let meta = div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_sm()
+                                .child(SharedString::from(item.author.login.clone())),
+                        )
+                        .child(small_tag(label, color.into()))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(relative_time(item.created_at))),
+                        );
+                    let body = if item.body_markdown.trim().is_empty() {
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .italic()
+                            .child("(no description)")
+                            .into_any_element()
+                    } else {
+                        render_comment_body(&item.body_markdown, cx)
+                    };
+                    timeline = timeline.child(
+                        div()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded_md()
+                            .bg(cx.theme().secondary.opacity(0.5))
+                            .p_2()
+                            .child(meta)
+                            .child(body),
+                    );
+                }
+            }
+        }
+
+        // Composer to post a new conversation comment.
+        if let Some(input) = &self.conv_input {
+            let posting = self.posting_comment;
+            let mut composer = div().flex().flex_col().gap_2().child(
+                div()
+                    .h(px(64.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(Input::new(input)),
+            );
+            if let Some(err) = &self.conv_error {
+                composer = composer.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xf85149))
+                        .child(SharedString::from(err.clone())),
+                );
+            }
+            timeline = timeline.child(composer.child(
+                div().flex().justify_end().child(
+                    Button::new("post-comment")
+                        .label(if posting { "Posting…" } else { "Comment" })
+                        .primary()
+                        .small()
+                        .disabled(posting)
+                        .on_click(cx.listener(|this, _, _, cx| this.post_conversation_comment(cx))),
+                ),
+            ));
+        }
+
+        // Jump-list of line-comment threads.
+        let live_threads: Vec<&ReviewThread> =
+            self.threads.iter().filter(|t| !t.is_resolved).collect();
+        if !live_threads.is_empty() {
+            timeline = timeline.child(
+                div()
+                    .mt_2()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(SharedString::from(format!(
+                        "Review comments ({})",
+                        live_threads.len()
+                    ))),
+            );
+            for thread in live_threads {
+                let thread_id = thread.id.clone();
+                let entity = cx.entity();
+                let first = thread
+                    .comments
+                    .first()
+                    .map(|c| c.body_markdown.lines().next().unwrap_or("").to_string())
+                    .unwrap_or_default();
+                let loc = match thread.line {
+                    Some(l) => format!("{}:{}", thread.path, l),
+                    None => format!("{} (outdated)", thread.path),
+                };
+                timeline = timeline.child(
+                    div()
+                        .id(SharedString::from(format!("jump-{}", thread.id.0)))
+                        .flex()
+                        .flex_col()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_click(move |_, _, cx| {
+                            let thread_id = thread_id.clone();
+                            entity.update(cx, |this, cx| this.jump_to_thread(&thread_id, cx));
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_family(MONO)
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(SharedString::from(loc)),
+                        )
+                        .child(div().text_sm().truncate().child(SharedString::from(first))),
+                );
+            }
+        }
+
+        div()
+            .w(px(360.))
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .id("conversation-scroll")
+            .overflow_y_scroll()
+            .child(timeline)
+            .into_any_element()
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let url = self.pr.url.clone();
         let thread_count = self.threads.len();
@@ -939,6 +1188,21 @@ impl PrSessionView {
                             "{unresolved}/{thread_count} threads open"
                         ))),
                 )
+            })
+            .child({
+                let conv_count = self.conversation.as_ref().map(|c| c.items.len()).unwrap_or(0);
+                Button::new("toggle-conversation")
+                    .label(if conv_count > 0 {
+                        format!("Conversation ({conv_count})")
+                    } else {
+                        "Conversation".to_string()
+                    })
+                    .xsmall()
+                    .when(self.show_conversation, |b| b.primary())
+                    .when(!self.show_conversation, |b| b.ghost())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_conversation(window, cx)
+                    }))
             })
             .child(
                 Button::new("toggle-view")
@@ -1504,16 +1768,17 @@ fn fetch_diff(client: &GithubClient, pr: &PrSummary) -> Result<LoadedDiff, Strin
     let threads = client
         .pr_review_threads(&pr.repo, pr.number)
         .map_err(|e| e.to_string())?;
-    // The review/merge state is best-effort: a failure here shouldn't block
-    // reading the diff.
+    // The review/merge state and conversation are best-effort: a failure
+    // here shouldn't block reading the diff.
     let review_state = client.pr_review_state(&pr.repo, pr.number).ok();
+    let conversation = client.pr_conversation(&pr.repo, pr.number).ok();
     let mut files = Vec::with_capacity(pr_files.len());
     let mut stats = Vec::with_capacity(pr_files.len());
     for f in &pr_files {
         files.push(diff_kit::file_diff_from_pr_file(f).map_err(|e| format!("{}: {e}", f.path))?);
         stats.push((f.additions, f.deletions));
     }
-    Ok(LoadedDiff { files, stats, threads, review_state })
+    Ok(LoadedDiff { files, stats, threads, review_state, conversation })
 }
 
 impl gpui::EventEmitter<SessionEvent> for PrSessionView {}
@@ -1601,6 +1866,9 @@ impl Render for PrSessionView {
                             .size_full(),
                         ),
                     )
+                    .when(self.show_conversation, |row| {
+                        row.child(self.render_conversation_panel(cx))
+                    })
                     .into_any_element()
             }
         };

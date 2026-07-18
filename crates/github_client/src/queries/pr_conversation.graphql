@@ -1,0 +1,34 @@
+query PrConversation($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      title
+      body
+      createdAt
+      author {
+        login
+        avatarUrl
+      }
+      comments(first: 100) {
+        nodes {
+          body
+          createdAt
+          author {
+            login
+            avatarUrl
+          }
+        }
+      }
+      reviews(first: 100) {
+        nodes {
+          body
+          state
+          submittedAt
+          author {
+            login
+            avatarUrl
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+@@ -68,6 +68,30 @@ test('returns 404 with unknown runtime version', async () => {
+   expect(res._getStatusCode()).toBe(404);
+ });
+ 
++test('returns a diff manifest', async () => {
++  process.env.PRIVATE_KEY_PATH = 'updates/test/1/privatekey.pem';
++
++  const { req, res } = createMocks({
++    method: 'GET',
++    headers: {
++      'expo-protocol-version': '1',
++      'expo-runtime-version': 'test',
++      'expo-platform': 'ios',
++      'expo-channel-name': 'main',
++      'expo-current-update-id': 'b15ed6d8f39b04ada248fa3b95fd7e0e',
++    },
++  });
++
++  await handleManifest(req, res);
++
++  expect(res._getStatusCode()).toBe(200);
++
++  const { body } = nullthrows(await getManifestPartAsync(res, 'manifest'));
++  const data = JSON.parse(body);
++
++  expect(data.assets.length).toBe(1);
++});
++
+ describe.each([['0'], ['1']])('protocol version %p', (protocolVersion) => {
+   test.each([
+     [

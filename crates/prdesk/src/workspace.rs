@@ -80,6 +80,28 @@ impl Workspace {
         }
     }
 
+    /// Debug entry point: open a PR session by `owner/repo#number` with a
+    /// minimal summary (fetch only needs repo + number). Gated on the
+    /// `PRDESK_DEBUG_PR` env var in main.
+    pub fn open_pr_debug(&mut self, repo: RepoId, number: u64, cx: &mut Context<Self>) {
+        let pr = PrSummary {
+            repo,
+            number: github_types::PrNumber(number),
+            node_id: github_types::NodeId(String::new()),
+            title: format!("debug #{number}"),
+            author: github_types::Actor { login: "debug".into(), avatar_url: None },
+            is_draft: false,
+            state: github_types::PrState::Open,
+            review_decision: None,
+            checks: None,
+            head_ref: String::new(),
+            head_sha: String::new(),
+            updated_at: chrono::Utc::now(),
+            url: String::new(),
+        };
+        self.open_session(pr, cx);
+    }
+
     fn open_session(&mut self, pr: PrSummary, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let config = self.config.clone();

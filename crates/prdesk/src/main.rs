@@ -70,6 +70,16 @@ fn main() {
                     if let Some(path) = open_local {
                         view.update(cx, |ws, cx| ws.open_local(path, window, cx));
                     }
+                    // Debug: PRDESK_DEBUG_PR="owner/repo#123" opens that PR directly.
+                    if let Ok(spec) = std::env::var("PRDESK_DEBUG_PR") {
+                        if let Some((slug, num)) = spec.rsplit_once('#') {
+                            if let (Some(repo), Ok(n)) =
+                                (github_types::RepoId::parse(slug), num.parse::<u64>())
+                            {
+                                view.update(cx, |ws, cx| ws.open_pr_debug(repo, n, cx));
+                            }
+                        }
+                    }
                     window.focus(&view.read(cx).focus_handle);
                     cx.new(|cx| Root::new(view, window, cx))
                 },

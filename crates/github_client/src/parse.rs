@@ -4,9 +4,9 @@
 
 use chrono::{DateTime, Utc};
 use github_types::{
-    Actor, CheckState, DiffSide, FileChangeStatus, MergeableState, NodeId, PendingReview, PrFile,
-    PrNumber, PrReviewState, PrState, PrSummary, RepoId, ReviewComment, ReviewDecision,
-    ReviewThread,
+    Actor, CheckState, ConversationItem, ConversationKind, DiffSide, FileChangeStatus,
+    MergeableState, NodeId, PendingReview, PrConversation, PrFile, PrNumber, PrReviewState, PrState,
+    PrSummary, RepoId, ReviewComment, ReviewDecision, ReviewThread, ReviewVerdict,
 };
 use serde::Deserialize;
 
@@ -207,6 +207,111 @@ impl From<ExtraPr> for PrReviewState {
     }
 }
 
+// ---- pr_conversation query ----
+
+#[derive(Deserialize)]
+pub struct ConversationData {
+    pub repository: ConversationRepo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationRepo {
+    pub pull_request: ConversationPr,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPr {
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub author: Option<GqlActor>,
+    pub comments: GqlIssueComments,
+    pub reviews: GqlReviews,
+}
+
+#[derive(Deserialize)]
+pub struct GqlIssueComments {
+    pub nodes: Vec<GqlIssueComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlIssueComment {
+    #[serde(default)]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub author: Option<GqlActor>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlReviews {
+    pub nodes: Vec<GqlReview>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlReview {
+    #[serde(default)]
+    pub body: String,
+    pub state: String,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub author: Option<GqlActor>,
+}
+
+fn actor_or_ghost(a: Option<GqlActor>) -> Actor {
+    a.map(|a| Actor { login: a.login, avatar_url: a.avatar_url })
+        .unwrap_or(Actor { login: "ghost".into(), avatar_url: None })
+}
+
+impl From<ConversationPr> for PrConversation {
+    fn from(pr: ConversationPr) -> Self {
+        let mut items: Vec<ConversationItem> = Vec::new();
+        // The description leads the timeline (even if empty, so the author and
+        // date show).
+        items.push(ConversationItem {
+            author: actor_or_ghost(pr.author),
+            body_markdown: pr.body,
+            created_at: pr.created_at,
+            kind: ConversationKind::Description,
+        });
+        for c in pr.comments.nodes {
+            items.push(ConversationItem {
+                author: actor_or_ghost(c.author),
+                body_markdown: c.body,
+                created_at: c.created_at,
+                kind: ConversationKind::Comment,
+            });
+        }
+        for r in pr.reviews.nodes {
+            let verdict = match r.state.as_str() {
+                "APPROVED" => ReviewVerdict::Approve,
+                "CHANGES_REQUESTED" => ReviewVerdict::RequestChanges,
+                "COMMENTED" => ReviewVerdict::Comment,
+                // PENDING / DISMISSED and anything else: skip.
+                _ => continue,
+            };
+            // A COMMENTED review with no summary is just the container for
+            // line comments (which show inline); don't clutter the timeline.
+            if verdict == ReviewVerdict::Comment && r.body.trim().is_empty() {
+                continue;
+            }
+            let Some(created_at) = r.submitted_at else { continue };
+            items.push(ConversationItem {
+                author: actor_or_ghost(r.author),
+                body_markdown: r.body,
+                created_at,
+                kind: ConversationKind::Review(verdict),
+            });
+        }
+        // Timeline order, oldest first (the description is always first).
+        items.sort_by_key(|i| i.created_at);
+        PrConversation { title: pr.title, items }
+    }
+}
+
 // ---- reviewThreads query ----
 
 #[derive(Deserialize)]
@@ -352,6 +457,26 @@ impl From<RestPrFile> for PrFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_conversation_fixture() {
+        let raw = include_str!("../fixtures/pr_conversation.json");
+        let data: ConversationData = serde_json::from_str(raw).expect("fixture parses");
+        let conv = PrConversation::from(data.repository.pull_request);
+        // Description + 1 comment + 1 approved review. The empty COMMENTED
+        // review and the PENDING review are filtered out.
+        assert_eq!(conv.items.len(), 3, "{:?}", conv.items);
+        // Description leads.
+        assert_eq!(conv.items[0].kind, ConversationKind::Description);
+        assert_eq!(conv.items[0].author.login, "saxenanickk");
+        // Sorted by time: comment (07-02) before approved review (07-03).
+        assert_eq!(conv.items[1].kind, ConversationKind::Comment);
+        assert_eq!(
+            conv.items[2].kind,
+            ConversationKind::Review(ReviewVerdict::Approve)
+        );
+        assert_eq!(conv.items[2].body_markdown, "Looks good now, thanks!");
+    }
 
     #[test]
     fn parses_threads_fixture() {
