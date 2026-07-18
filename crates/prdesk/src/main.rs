@@ -37,15 +37,20 @@ fn main() {
             gpui_component::init(cx);
             theme::apply(cx);
 
+            // Single-letter nav bindings must NOT fire while a text input is
+            // focused, or you can't type those letters into a composer. The
+            // `&& !Input` predicate disables them whenever a gpui-component
+            // Input (key context "Input") is in the focus path.
+            let nav_ctx = format!("{SESSION_KEY_CONTEXT} && !Input");
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
-                // Session navigation, scoped so typing in a composer isn't
-                // hijacked (the Input's own context takes precedence there).
-                KeyBinding::new("]", NextFile, Some(SESSION_KEY_CONTEXT)),
-                KeyBinding::new("[", PrevFile, Some(SESSION_KEY_CONTEXT)),
-                KeyBinding::new("n", NextThread, Some(SESSION_KEY_CONTEXT)),
-                KeyBinding::new("p", PrevThread, Some(SESSION_KEY_CONTEXT)),
-                KeyBinding::new("r", RefreshSession, Some(SESSION_KEY_CONTEXT)),
+                KeyBinding::new("]", NextFile, Some(&nav_ctx)),
+                KeyBinding::new("[", PrevFile, Some(&nav_ctx)),
+                KeyBinding::new("n", NextThread, Some(&nav_ctx)),
+                KeyBinding::new("p", PrevThread, Some(&nav_ctx)),
+                KeyBinding::new("r", RefreshSession, Some(&nav_ctx)),
+                // Escape is safe to keep session-scoped: it cancels the
+                // composer/drawer (a non-text key, so it never blocks typing).
                 KeyBinding::new("escape", DismissOverlay, Some(SESSION_KEY_CONTEXT)),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
