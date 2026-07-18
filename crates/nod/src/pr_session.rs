@@ -269,7 +269,7 @@ impl PrSessionView {
             let result = cx
                 .background_spawn(async move {
                     if dirty {
-                        repo_local::stash_all(&path, &format!("prdesk: before PR #{number}"))?;
+                        repo_local::stash_all(&path, &format!("nod: before PR #{number}"))?;
                     }
                     repo_local::checkout_pr(&path, &repo, number)
                 })
@@ -999,7 +999,7 @@ impl PrSessionView {
     fn flash_error(&mut self, message: String, cx: &mut Context<Self>) {
         // For now surface transient errors via stderr; a toast layer is a
         // polish item. Kept as a single channel so callers stay uniform.
-        eprintln!("prdesk: {message}");
+        eprintln!("nod: {message}");
         cx.notify();
     }
 

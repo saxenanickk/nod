@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Builds a distributable prdesk.app bundle for macOS:
+# Builds a distributable nod.app bundle for macOS:
 #   1. renders the icon at every iconset size and packs a .icns
 #   2. builds the release binary
-#   3. assembles dist/prdesk.app (Info.plist + icon + binary)
+#   3. assembles dist/nod.app (Info.plist + icon + binary)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APP_NAME="prdesk"
-BUNDLE_ID="com.saxenanickk.prdesk"
+APP_NAME="nod"
+BUNDLE_ID="com.saxenanickk.nod"
 VERSION="0.1.0"
 
 ICONSET="$(mktemp -d)/${APP_NAME}.iconset"

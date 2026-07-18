@@ -1,5 +1,5 @@
 //! Applies a Zed-flavored One Dark palette over gpui-component's default
-//! theme, so prdesk reads like Zed rather than a generic shadcn dark theme.
+//! theme, so nod reads like Zed rather than a generic shadcn dark theme.
 
 use gpui::{App, Hsla, Rgba, px, rgb};
 use gpui_component::{Theme, ThemeMode};

@@ -1,4 +1,4 @@
-//! Parses a recorded real `git diff` (a slice of prdesk's own history) and
+//! Parses a recorded real `git diff` (a slice of nod's own history) and
 //! checks structural invariants across every file.
 
 use diff_kit::{DiffLine, FileStatus, parse_git_diff};

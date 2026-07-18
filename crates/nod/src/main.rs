@@ -1,4 +1,4 @@
-//! prdesk — a GPUI-native GitHub PR review companion for Zed.
+//! Nod — a GPUI-native GitHub PR review companion for Zed.
 
 mod chrome;
 mod config;
@@ -23,11 +23,11 @@ use pr_session::{
 };
 use workspace::Workspace;
 
-actions!(prdesk, [Quit]);
+actions!(nod, [Quit]);
 
 fn main() {
     let config = config::load_or_init();
-    // `prdesk <path>` opens that local repo's review directly.
+    // `nod <path>` opens that local repo's review directly.
     let open_local = std::env::args().nth(1).and_then(|arg| {
         let path = std::path::PathBuf::from(&arg);
         path.is_dir().then(|| std::fs::canonicalize(&path).unwrap_or(path))
@@ -68,7 +68,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("prdesk".into()),
+                        title: Some("Nod".into()),
                         ..TitleBar::title_bar_options()
                     }),
                     ..Default::default()
@@ -78,8 +78,8 @@ fn main() {
                     if let Some(path) = open_local {
                         view.update(cx, |ws, cx| ws.open_local(path, window, cx));
                     }
-                    // Debug: PRDESK_DEBUG_PR="owner/repo#123" opens that PR directly.
-                    if let Ok(spec) = std::env::var("PRDESK_DEBUG_PR") {
+                    // Debug: NOD_DEBUG_PR="owner/repo#123" opens that PR directly.
+                    if let Ok(spec) = std::env::var("NOD_DEBUG_PR") {
                         if let Some((slug, num)) = spec.rsplit_once('#') {
                             if let (Some(repo), Ok(n)) =
                                 (github_types::RepoId::parse(slug), num.parse::<u64>())

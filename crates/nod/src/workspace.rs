@@ -84,7 +84,7 @@ impl Workspace {
     /// (fetch only needs repo + number; other fields fill in on refresh).
     /// `account` pins the gh account that can access the repo (work vs
     /// personal); `None` uses the app's default client. Used by the local→PR
-    /// bridge and the `PRDESK_DEBUG_PR` hook.
+    /// bridge and the `NOD_DEBUG_PR` hook.
     pub fn open_pr_by_number(
         &mut self,
         repo: RepoId,

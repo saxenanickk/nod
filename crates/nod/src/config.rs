@@ -1,5 +1,5 @@
 //! App configuration, persisted at
-//! `~/Library/Application Support/prdesk/config.json`.
+//! `~/Library/Application Support/nod/config.json`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,6 +35,12 @@ impl Default for Config {
 
 pub fn config_path() -> Option<PathBuf> {
     let home = std::env::home_dir()?;
+    Some(home.join("Library/Application Support/nod/config.json"))
+}
+
+/// The pre-rename config location, kept so existing settings migrate forward.
+fn legacy_config_path() -> Option<PathBuf> {
+    let home = std::env::home_dir()?;
     Some(home.join("Library/Application Support/prdesk/config.json"))
 }
 
@@ -55,9 +61,20 @@ pub fn load_or_init() -> Config {
     let Some(path) = config_path() else {
         return Config::default();
     };
+    // One-time migration from the pre-rename location.
+    if !path.exists() {
+        if let Some(legacy) = legacy_config_path() {
+            if legacy.exists() {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::copy(&legacy, &path);
+            }
+        }
+    }
     match std::fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|err| {
-            eprintln!("prdesk: ignoring malformed {}: {err}", path.display());
+            eprintln!("nod: ignoring malformed {}: {err}", path.display());
             Config::default()
         }),
         Err(_) => {

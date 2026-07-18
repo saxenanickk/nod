@@ -17,7 +17,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 
 #[test]
 fn finds_and_reads_a_real_clone() {
-    let tmp = std::env::temp_dir().join(format!("prdesk-test-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("nod-test-{}", std::process::id()));
     let nested = tmp.join("code").join("acme-app");
     std::fs::create_dir_all(&nested).unwrap();
 
@@ -52,7 +52,7 @@ fn finds_and_reads_a_real_clone() {
 
 #[test]
 fn local_diffs() {
-    let clone = std::env::temp_dir().join(format!("prdesk-diff-{}", std::process::id()));
+    let clone = std::env::temp_dir().join(format!("nod-diff-{}", std::process::id()));
     std::fs::create_dir_all(&clone).unwrap();
     git(&clone, &["init", "-q", "-b", "main"]);
     git(&clone, &["config", "user.email", "t@example.com"]);

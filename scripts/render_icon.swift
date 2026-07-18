@@ -1,4 +1,4 @@
-// Renders the prdesk app icon (a git pull-request / branch glyph on a dark
+// Renders the nod app icon (a git pull-request / branch glyph on a dark
 // rounded tile) to a PNG at an arbitrary size. Pure CoreGraphics so it stays
 // crisp at every icon size.
 //

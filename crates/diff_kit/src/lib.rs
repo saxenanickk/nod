@@ -1,5 +1,5 @@
 //! Diff parsing, row layout, and review-comment anchor mapping — the
-//! correctness core of prdesk. UI-free by design.
+//! correctness core of nod. UI-free by design.
 
 mod git_diff;
 mod layout;

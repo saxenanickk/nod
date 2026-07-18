@@ -3587,6 +3587,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nod"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "diff_kit",
+ "github_client",
+ "github_types",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "repo_local",
+ "review_store",
+ "serde",
+ "serde_json",
+ "syntax",
+ "zed_bridge",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4226,26 +4246,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
-]
-
-[[package]]
-name = "prdesk"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "diff_kit",
- "github_client",
- "github_types",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "repo_local",
- "review_store",
- "serde",
- "serde_json",
- "syntax",
- "zed_bridge",
 ]
 
 [[package]]

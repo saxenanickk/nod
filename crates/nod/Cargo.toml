@@ -1,8 +1,8 @@
 [package]
-name = "prdesk"
+name = "nod"
 version = "0.1.0"
 edition = "2024"
-description = "GPUI app: GitHub PR review companion for Zed."
+description = "Nod — a GPUI-native GitHub PR review companion for Zed."
 
 [dependencies]
 anyhow = { workspace = true }
@@ -23,8 +23,8 @@ gpui-component-assets = "0.5"
 # `cargo bundle --release` (needs `cargo install cargo-bundle`) packages a
 # macOS .app from this metadata.
 [package.metadata.bundle]
-name = "prdesk"
-identifier = "dev.saxenanickk.prdesk"
+name = "nod"
+identifier = "com.saxenanickk.nod"
 short_description = "GitHub PR review companion for Zed"
 category = "public.app-category.developer-tools"
 osx_minimum_system_version = "11.0"

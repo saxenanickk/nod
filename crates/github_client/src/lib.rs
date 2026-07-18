@@ -1,4 +1,4 @@
-//! GitHub API access for prdesk. Reads and writes go through a pluggable
+//! GitHub API access for nod. Reads and writes go through a pluggable
 //! [`GithubTransport`]; all calls are blocking — run them on a background
 //! executor.
 

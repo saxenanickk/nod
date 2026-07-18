@@ -1,4 +1,4 @@
-//! Pure GitHub PR/review domain models shared by every prdesk crate.
+//! Pure GitHub PR/review domain models shared by every nod crate.
 //!
 //! This crate must stay free of I/O, HTTP, and UI dependencies — it is the
 //! layer that would port into another host (e.g. Zed core) verbatim.

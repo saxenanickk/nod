@@ -8,7 +8,7 @@ members = [
     "crates/review_store",
     "crates/zed_bridge",
     "crates/syntax",
-    "crates/prdesk",
+    "crates/nod",
 ]
 
 [workspace.dependencies]
