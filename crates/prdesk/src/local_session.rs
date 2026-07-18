@@ -11,10 +11,10 @@ use diff_kit::{
 };
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
-    SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, uniform_list,
+    SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
 };
@@ -62,6 +62,10 @@ pub struct LocalSessionView {
     header_rows: Vec<usize>,
     list_state: ListState,
     sidebar_scroll: UniformListScrollHandle,
+    /// Open "create PR" form: (title input, body input).
+    create_form: Option<(Entity<InputState>, Entity<InputState>)>,
+    creating_pr: bool,
+    create_error: Option<String>,
     generation: u64,
     _subscription: gpui::Subscription,
     pub focus_handle: FocusHandle,
@@ -97,12 +101,72 @@ impl LocalSessionView {
             header_rows: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(512.)),
             sidebar_scroll: UniformListScrollHandle::new(),
+            create_form: None,
+            creating_pr: false,
+            create_error: None,
             generation: 0,
             _subscription: subscription,
             focus_handle: cx.focus_handle(),
         };
         this.detect_base_then_load(window, cx);
         this
+    }
+
+    fn open_create_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let clone = self.clone.clone();
+        let default_title = repo_local::last_commit_subject(&clone);
+        let title = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Pull request title")
+        });
+        if !default_title.is_empty() {
+            title.update(cx, |s, cx| s.set_value(default_title, window, cx));
+        }
+        let body = cx.new(|cx| {
+            InputState::new(window, cx).multi_line(true).placeholder("Description (optional)…")
+        });
+        window.focus(&title.focus_handle(cx));
+        self.create_form = Some((title, body));
+        self.create_error = None;
+        cx.notify();
+    }
+
+    fn submit_create_pr(&mut self, cx: &mut Context<Self>) {
+        if self.creating_pr {
+            return;
+        }
+        let Some((title_input, body_input)) = &self.create_form else { return };
+        let title = title_input.read(cx).value().trim().to_string();
+        if title.is_empty() {
+            self.create_error = Some("A title is required.".into());
+            cx.notify();
+            return;
+        }
+        let body = body_input.read(cx).value().to_string();
+        let base = self.base_input.read(cx).value().trim().to_string();
+        self.creating_pr = true;
+        self.create_error = None;
+        cx.notify();
+        let clone = self.clone.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    repo_local::create_pr(&clone, &title, &body, &base)
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                this.creating_pr = false;
+                match result {
+                    Ok((repo, number)) => {
+                        this.create_form = None;
+                        cx.emit(LocalSessionEvent::OpenPr { repo, number });
+                    }
+                    Err(err) => this.create_error = Some(format!("{err:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Auto-detects the base branch, fills the input, then loads the diff.
@@ -279,6 +343,75 @@ impl LocalSessionView {
         )
     }
 
+    fn render_create_form(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (title, body) = self.create_form.as_ref().expect("form present");
+        let creating = self.creating_pr;
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(SharedString::from(format!(
+                        "Create pull request — {} ← base",
+                        self.branch
+                    ))),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(Input::new(title).small()),
+            )
+            .child(
+                div()
+                    .h(px(64.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(Input::new(body)),
+            );
+        if let Some(err) = &self.create_error {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xe06c75))
+                    .child(SharedString::from(err.clone())),
+            );
+        }
+        panel.child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("create-cancel")
+                        .label("Cancel")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.create_form = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("create-submit")
+                        .label(if creating { "Creating…" } else { "Create PR" })
+                        .primary()
+                        .small()
+                        .disabled(creating)
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_create_pr(cx))),
+                ),
+        )
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let clone = self.clone.clone();
         let is_branch = self.mode == LocalMode::BranchVsBase;
@@ -363,7 +496,8 @@ impl LocalSessionView {
                     .xsmall()
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
-            // If this branch has an open PR, offer to review/comment on it.
+            // If this branch has an open PR, offer to review/comment on it;
+            // otherwise offer to create one.
             .when_some(self.branch_pr.clone(), |row, (repo, number)| {
                 row.child(
                     Button::new("local-review-pr")
@@ -375,6 +509,17 @@ impl LocalSessionView {
                                 repo: repo.clone(),
                                 number,
                             })
+                        })),
+                )
+            })
+            .when(self.branch_pr.is_none() && !self.files.is_empty(), |row| {
+                row.child(
+                    Button::new("local-create-pr")
+                        .label("Create PR")
+                        .primary()
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_create_form(window, cx)
                         })),
                 )
             })
@@ -514,6 +659,9 @@ impl Render for LocalSessionView {
             .text_color(cx.theme().foreground)
             .child(self.render_header(cx))
             .child(body)
+            .when(self.create_form.is_some(), |root| {
+                root.child(self.render_create_form(cx))
+            })
     }
 }
 

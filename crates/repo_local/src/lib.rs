@@ -71,6 +71,57 @@ pub fn uncommitted_diff(clone: &Path) -> Result<String> {
     git(clone, &["diff", "HEAD"])
 }
 
+/// The subject line of the clone's most recent commit (a good default PR
+/// title).
+pub fn last_commit_subject(clone: &Path) -> String {
+    git(clone, &["log", "-1", "--format=%s"]).unwrap_or_default()
+}
+
+/// Creates a PR for the current branch: pushes it to `origin`, then runs
+/// `gh pr create`. Returns the new PR as `(base repo, number)`.
+pub fn create_pr(clone: &Path, title: &str, body: &str, base: &str) -> Result<(RepoId, u64)> {
+    let branch = current_branch(clone)?;
+    // Push the branch and set upstream (best-effort: gh also pushes, but doing
+    // it here avoids gh's interactive remote picker).
+    let _ = git(clone, &["push", "-u", "origin", &branch]);
+
+    let mut args = vec!["pr", "create", "--title", title, "--body", body, "--head", &branch];
+    if !base.trim().is_empty() {
+        args.push("--base");
+        args.push(base);
+    }
+    let out = Command::new("gh")
+        .current_dir(clone)
+        .args(&args)
+        .output()
+        .context("failed to run gh pr create")?;
+    if !out.status.success() {
+        bail!(
+            "gh pr create failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    // gh prints the new PR's URL.
+    let url = String::from_utf8_lossy(&out.stdout);
+    let url = url.lines().find(|l| l.contains("github.com")).unwrap_or("").trim();
+    let rest = url
+        .split("github.com/")
+        .nth(1)
+        .context("no PR URL from gh pr create")?;
+    let mut parts = rest.split('/');
+    let owner = parts.next().unwrap_or("").to_string();
+    let name = parts.next().unwrap_or("").to_string();
+    // parts: ["pull", "N"]
+    let number: u64 = parts
+        .nth(1)
+        .and_then(|s| s.trim().parse().ok())
+        .context("no PR number in gh output")?;
+    if owner.is_empty() || name.is_empty() {
+        bail!("could not parse PR repo from {url}");
+    }
+    Ok((RepoId { owner, name }, number))
+}
+
 /// The open PR associated with the clone's current branch, if any, as
 /// `(base repo, number)`. Uses `gh pr view` (extracting fields with `--jq` so
 /// no JSON dependency is needed here); returns `None` when there's no PR.
