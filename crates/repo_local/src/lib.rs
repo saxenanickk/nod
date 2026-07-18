@@ -123,14 +123,17 @@ pub fn create_pr(clone: &Path, title: &str, body: &str, base: &str) -> Result<(R
 }
 
 /// The open PR associated with the clone's current branch, if any, as
-/// `(base repo, number)`. Uses `gh pr view` (extracting fields with `--jq` so
-/// no JSON dependency is needed here); returns `None` when there's no PR.
-pub fn branch_pr(clone: &Path) -> Option<(RepoId, u64)> {
-    let out = Command::new("gh")
-        .current_dir(clone)
-        .args(["pr", "view", "--json", "number,url", "--jq", ".number, .url"])
-        .output()
-        .ok()?;
+/// `(base repo, number)`. `token` pins the gh account (needed when the repo is
+/// only accessible to a non-active account); `None` uses gh's active account.
+/// Returns `None` when there's no PR or the account can't see it.
+pub fn branch_pr(clone: &Path, token: Option<&str>) -> Option<(RepoId, u64)> {
+    let mut cmd = Command::new("gh");
+    cmd.current_dir(clone)
+        .args(["pr", "view", "--json", "number,url", "--jq", ".number, .url"]);
+    if let Some(token) = token {
+        cmd.env("GH_TOKEN", token);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }

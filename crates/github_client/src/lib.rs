@@ -11,6 +11,83 @@ use github_types::{
     CommentAnchor, DiffSide, MergeMethod, NodeId, PrConversation, PrFile, PrNumber, PrReviewState,
     PrSummary, RepoId, ReviewThread, ReviewVerdict,
 };
+use std::process::Command;
+
+/// Logins of all github.com accounts logged into the gh CLI, active first.
+pub fn gh_accounts() -> Vec<String> {
+    let Ok(out) = Command::new("gh").args(["auth", "status"]).output() else {
+        return Vec::new();
+    };
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut accounts = Vec::new();
+    for line in text.lines() {
+        if let Some(idx) = line.find("account ") {
+            let name = line[idx + "account ".len()..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() && !accounts.contains(&name.to_string()) {
+                accounts.push(name.to_string());
+            }
+        }
+    }
+    accounts
+}
+
+fn token_for(account: &str) -> Option<String> {
+    let out = Command::new("gh")
+        .args(["auth", "token", "--user", account])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// The gh account token, if any, for `account`.
+pub fn account_token(account: &str) -> Option<String> {
+    token_for(account)
+}
+
+/// Finds a logged-in gh account that can access `repo`, trying `preferred`
+/// first. Returns the account login, or `None` if none has access.
+pub fn account_for_repo(repo: &RepoId, preferred: Option<&str>) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(p) = preferred {
+        candidates.push(p.to_string());
+    }
+    for a in gh_accounts() {
+        if !candidates.contains(&a) {
+            candidates.push(a);
+        }
+    }
+    for account in candidates {
+        let Some(token) = token_for(&account) else {
+            continue;
+        };
+        let ok = Command::new("gh")
+            .env("GH_TOKEN", token)
+            .args([
+                "api",
+                &format!("repos/{}/{}", repo.owner, repo.name),
+                "--jq",
+                ".id",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(account);
+        }
+    }
+    None
+}
 use parse::{ConversationData, ExtraData, RestPrFile, SearchNode, SearchPrsData, ThreadsData};
 use serde_json::json;
 use std::sync::Arc;

@@ -82,14 +82,22 @@ impl Workspace {
 
     /// Opens a PR session by `owner/repo#number` with a minimal summary
     /// (fetch only needs repo + number; other fields fill in on refresh).
-    /// Used by the local→PR bridge and the `PRDESK_DEBUG_PR` hook.
-    pub fn open_pr_by_number(&mut self, repo: RepoId, number: u64, cx: &mut Context<Self>) {
+    /// `account` pins the gh account that can access the repo (work vs
+    /// personal); `None` uses the app's default client. Used by the local→PR
+    /// bridge and the `PRDESK_DEBUG_PR` hook.
+    pub fn open_pr_by_number(
+        &mut self,
+        repo: RepoId,
+        number: u64,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let pr = PrSummary {
             repo,
             number: github_types::PrNumber(number),
             node_id: github_types::NodeId(String::new()),
-            title: format!("debug #{number}"),
-            author: github_types::Actor { login: "debug".into(), avatar_url: None },
+            title: format!("#{number}"),
+            author: github_types::Actor { login: String::new(), avatar_url: None },
             is_draft: false,
             state: github_types::PrState::Open,
             review_decision: None,
@@ -99,11 +107,20 @@ impl Workspace {
             updated_at: chrono::Utc::now(),
             url: String::new(),
         };
-        self.open_session(pr, cx);
+        // Use the account that can access the repo; fall back to the default.
+        let client = match account {
+            Some(account) => GithubClient::gh_cli_as(account),
+            None => self.client.clone(),
+        };
+        self.open_session_with(pr, client, cx);
     }
 
     fn open_session(&mut self, pr: PrSummary, cx: &mut Context<Self>) {
         let client = self.client.clone();
+        self.open_session_with(pr, client, cx);
+    }
+
+    fn open_session_with(&mut self, pr: PrSummary, client: GithubClient, cx: &mut Context<Self>) {
         let config = self.config.clone();
         let session = cx.new(|cx| PrSessionView::new(client, pr, &config, cx));
         self._session_subscription = Some(cx.subscribe(
@@ -137,11 +154,12 @@ impl Workspace {
                     this._local_subscription = None;
                     cx.notify();
                 }
-                LocalSessionEvent::OpenPr { repo, number } => {
-                    // Leave local review and open the real PR (commenting works there).
+                LocalSessionEvent::OpenPr { repo, number, account } => {
+                    // Leave local review and open the real PR with the account
+                    // that can access it (commenting works there).
                     this.local = None;
                     this._local_subscription = None;
-                    this.open_pr_by_number(repo.clone(), *number, cx);
+                    this.open_pr_by_number(repo.clone(), *number, account.clone(), cx);
                 }
             },
         ));

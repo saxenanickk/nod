@@ -82,7 +82,9 @@ fn main() {
                             if let (Some(repo), Ok(n)) =
                                 (github_types::RepoId::parse(slug), num.parse::<u64>())
                             {
-                                view.update(cx, |ws, cx| ws.open_pr_by_number(repo, n, cx));
+                                view.update(cx, |ws, cx| {
+                                    ws.open_pr_by_number(repo, n, None, cx)
+                                });
                             }
                         }
                     }

@@ -22,8 +22,13 @@ use std::path::PathBuf;
 
 pub enum LocalSessionEvent {
     Close,
-    /// Open the PR associated with this branch (for commenting/review).
-    OpenPr { repo: github_types::RepoId, number: u64 },
+    /// Open the PR associated with this branch (for commenting/review), using
+    /// the gh account that can access the repo.
+    OpenPr {
+        repo: github_types::RepoId,
+        number: u64,
+        account: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,7 +47,7 @@ struct LoadedLocal {
     branch: String,
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
-    branch_pr: Option<(github_types::RepoId, u64)>,
+    branch_pr: Option<(github_types::RepoId, u64, Option<String>)>,
 }
 
 pub struct LocalSessionView {
@@ -54,7 +59,7 @@ pub struct LocalSessionView {
     load: LocalLoad,
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
-    branch_pr: Option<(github_types::RepoId, u64)>,
+    branch_pr: Option<(github_types::RepoId, u64, Option<String>)>,
     rows: Vec<DiffRow>,
     split_rows: Vec<SplitRow>,
     view_mode: ViewMode,
@@ -158,7 +163,8 @@ impl LocalSessionView {
                 match result {
                     Ok((repo, number)) => {
                         this.create_form = None;
-                        cx.emit(LocalSessionEvent::OpenPr { repo, number });
+                        // create_pr used the active account, which has access.
+                        cx.emit(LocalSessionEvent::OpenPr { repo, number, account: None });
                     }
                     Err(err) => this.create_error = Some(format!("{err:#}")),
                 }
@@ -498,7 +504,7 @@ impl LocalSessionView {
             )
             // If this branch has an open PR, offer to review/comment on it;
             // otherwise offer to create one.
-            .when_some(self.branch_pr.clone(), |row, (repo, number)| {
+            .when_some(self.branch_pr.clone(), |row, (repo, number, account)| {
                 row.child(
                     Button::new("local-review-pr")
                         .label(format!("Review PR #{number}"))
@@ -508,6 +514,7 @@ impl LocalSessionView {
                             cx.emit(LocalSessionEvent::OpenPr {
                                 repo: repo.clone(),
                                 number,
+                                account: account.clone(),
                             })
                         })),
                 )
@@ -553,7 +560,15 @@ fn fetch_local(clone: &std::path::Path, mode: LocalMode, base: &str) -> Result<L
     };
     let files = diff_kit::parse_git_diff(&raw).map_err(|e| e.to_string())?;
     let stats = files.iter().map(file_stats).collect();
-    let branch_pr = repo_local::branch_pr(clone);
+    // Detect the branch's PR using whichever gh account can access this repo
+    // (personal vs work), so work-repo PRs resolve even when the app's default
+    // account can't see them.
+    let branch_pr = repo_local::origin_repo(clone).and_then(|repo| {
+        let account = github_client::account_for_repo(&repo, None);
+        let token = account.as_deref().and_then(github_client::account_token);
+        repo_local::branch_pr(clone, token.as_deref())
+            .map(|(pr_repo, number)| (pr_repo, number, account))
+    });
     Ok(LoadedLocal { branch, files, stats, branch_pr })
 }
 

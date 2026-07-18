@@ -298,6 +298,19 @@ impl PrSessionView {
                             .map(|(ix, t)| (t.id.0.clone(), ix))
                             .collect();
                         this.threads = loaded.threads;
+                        // When opened via the local→PR bridge the summary is
+                        // minimal (empty node_id/title); fill from authoritative
+                        // fetched data so commenting and the header work.
+                        if let Some(rs) = &loaded.review_state {
+                            this.pr.node_id = rs.node_id.clone();
+                        }
+                        if let Some(conv) = &loaded.conversation {
+                            if this.pr.title.is_empty()
+                                || this.pr.title.starts_with('#')
+                            {
+                                this.pr.title = conv.title.clone();
+                            }
+                        }
                         this.review_state = loaded.review_state;
                         this.conversation = loaded.conversation;
                         this.load = SessionLoad::Ready;
