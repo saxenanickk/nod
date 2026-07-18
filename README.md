@@ -10,11 +10,26 @@ app you keep next to Zed —
 - see the PRs waiting on you, check one out locally with one click,
 - read the diff with review comment threads inline,
 - comment, reply, resolve, approve/request changes, merge,
-- and jump from any diff line straight into Zed (`zed file:line`) with full
-  LSP.
+- review a **local repository's** diff (branch-vs-base or uncommitted) with no
+  PR involved, and
+- jump from any diff line straight into Zed (`zed file:line`) with full LSP.
 
 Built in GPUI (the same Rust UI framework Zed uses) with UI-free domain
 crates, so the core could one day move into Zed itself.
+
+## Two ways in
+
+The top nav switches between:
+
+- **PRs** — your review queue (to review / created / assigned). Open a PR to
+  review it: threads, comments, approve/request-changes, merge.
+- **Repos** — your local clones (auto-discovered under `clone_roots`, plus
+  anything in `clones`; or **Open folder…**). Each offers **Review local
+  changes** (a read-only diff of the current branch vs its base, or
+  uncommitted changes — toggle in the header) and **View PRs** (the PR queue
+  scoped to that repo).
+
+Or open a local review straight from the shell: `prdesk ~/path/to/repo`.
 
 ## Requirements
 

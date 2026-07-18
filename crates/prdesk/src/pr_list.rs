@@ -37,6 +37,9 @@ enum AuthState {
 pub struct PrListView {
     client: GithubClient,
     config: Config,
+    /// When set, overrides `config.scope` (e.g. `repo:owner/name` from the
+    /// repo picker). `None` uses the configured default scope.
+    scope_override: Option<String>,
     auth: AuthState,
     active_tab: QueueTab,
     tabs: HashMap<QueueTab, LoadState>,
@@ -51,6 +54,7 @@ impl PrListView {
         let mut this = Self {
             client,
             config,
+            scope_override: None,
             auth: AuthState::Checking,
             active_tab: QueueTab::ReviewRequested,
             tabs: HashMap::new(),
@@ -60,6 +64,17 @@ impl PrListView {
         };
         this.preflight(cx);
         this
+    }
+
+    fn scope(&self) -> &str {
+        self.scope_override.as_deref().unwrap_or(&self.config.scope)
+    }
+
+    /// Sets (or clears with `None`) a scope override and refreshes.
+    pub fn set_scope(&mut self, scope: Option<String>, cx: &mut Context<Self>) {
+        self.scope_override = scope;
+        self.refresh(cx);
+        cx.notify();
     }
 
     /// Verifies auth (by fetching the viewer login), then triggers the first
@@ -99,7 +114,7 @@ impl PrListView {
             // state when we have nothing yet.
             self.tabs.entry(tab).or_insert(LoadState::Loading);
             let client = self.client.clone();
-            let query = tab.search_query(&self.config.scope);
+            let query = tab.search_query(self.scope());
             cx.spawn(async move |this, cx| {
                 let fetched = cx
                     .background_spawn(async move { client.search_prs(&query, 30) })
@@ -327,8 +342,35 @@ impl Render for PrListView {
                     .pt_2()
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Pull Requests"),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("Pull Requests"),
+                            )
+                            .when_some(self.scope_override.clone(), |el, scope| {
+                                el.child(
+                                    div()
+                                        .id("scope-chip")
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_1()
+                                        .rounded_md()
+                                        .bg(cx.theme().secondary)
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().accent))
+                                        .child(SharedString::from(scope))
+                                        .child("✕")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_scope(None, cx)
+                                        })),
+                                )
+                            }),
                     )
                     .child(
                         div()

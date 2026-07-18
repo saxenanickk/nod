@@ -5,6 +5,7 @@ mod diff_pane;
 mod local_session;
 mod pr_list;
 mod pr_session;
+mod repo_picker;
 mod util;
 mod workspace;
 
