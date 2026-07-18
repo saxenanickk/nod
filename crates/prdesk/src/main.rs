@@ -6,6 +6,7 @@ mod local_session;
 mod pr_list;
 mod pr_session;
 mod repo_picker;
+mod theme;
 mod util;
 mod workspace;
 
@@ -13,7 +14,7 @@ use gpui::{
     App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions,
     prelude::*, px, size,
 };
-use gpui_component::{Root, Theme, ThemeMode, TitleBar};
+use gpui_component::{Root, TitleBar};
 use pr_session::{
     DismissOverlay, NextFile, NextThread, PrevFile, PrevThread, RefreshSession,
     SESSION_KEY_CONTEXT,
@@ -34,7 +35,7 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
+            theme::apply(cx);
 
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),

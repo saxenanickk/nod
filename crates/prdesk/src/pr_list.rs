@@ -207,21 +207,21 @@ impl PrListView {
         );
         let mut badges = div().flex().items_center().gap_1().flex_shrink_0();
         if pr.is_draft {
-            badges = badges.child(badge("Draft", rgb(0x8a8f98).into()));
+            badges = badges.child(badge("Draft", rgb(0x828997).into()));
         }
         if let Some(decision) = pr.review_decision {
             let (label, color) = match decision {
-                ReviewDecision::Approved => ("Approved", rgb(0x3fb950)),
-                ReviewDecision::ChangesRequested => ("Changes requested", rgb(0xf85149)),
-                ReviewDecision::ReviewRequired => ("Review required", rgb(0xd29922)),
+                ReviewDecision::Approved => ("Approved", rgb(0x98c379)),
+                ReviewDecision::ChangesRequested => ("Changes requested", rgb(0xe06c75)),
+                ReviewDecision::ReviewRequired => ("Review required", rgb(0xe5c07b)),
             };
             badges = badges.child(badge(label, color.into()));
         }
         if let Some(checks) = pr.checks {
             let (label, color) = match checks {
-                CheckState::Success => ("CI ✓", rgb(0x3fb950)),
-                CheckState::Failure | CheckState::Error => ("CI ✗", rgb(0xf85149)),
-                CheckState::Pending => ("CI …", rgb(0xd29922)),
+                CheckState::Success => ("CI ✓", rgb(0x98c379)),
+                CheckState::Failure | CheckState::Error => ("CI ✗", rgb(0xe06c75)),
+                CheckState::Pending => ("CI …", rgb(0xe5c07b)),
             };
             badges = badges.child(badge(label, color.into()));
         }
@@ -240,6 +240,7 @@ impl PrListView {
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(PrListEvent::OpenPr(open_pr.clone()));
             }))
+            .child(crate::diff_pane::avatar(&pr.author.login))
             .child(
                 div()
                     .flex_1()

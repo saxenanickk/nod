@@ -104,7 +104,7 @@ impl PaneData<'_> {
             .px_3()
             .font_family(MONO)
             .text_sm()
-            .text_color(rgb(0x6a9fb5))
+            .text_color(rgb(0x56b6c2))
             .bg(cx.theme().secondary.opacity(0.5))
             .child(SharedString::from(header))
             .into_any_element()
@@ -123,10 +123,10 @@ impl PaneData<'_> {
             match line {
                 DiffLine::Context { old, new, .. } => (Some(*old), Some(*new), " ", None),
                 DiffLine::Added { new, .. } => {
-                    (None, Some(*new), "+", Some(gpui::Hsla::from(rgb(0x2ea043)).opacity(0.13)))
+                    (None, Some(*new), "+", Some(gpui::Hsla::from(rgb(0x98c379)).opacity(0.13)))
                 }
                 DiffLine::Removed { old, .. } => {
-                    (Some(*old), None, "-", Some(gpui::Hsla::from(rgb(0xf85149)).opacity(0.13)))
+                    (Some(*old), None, "-", Some(gpui::Hsla::from(rgb(0xe06c75)).opacity(0.13)))
                 }
             };
         let zed_line = match line {
@@ -162,7 +162,7 @@ impl PaneData<'_> {
             el = el.bg(bg);
         }
         if in_comment_range {
-            el = el.border_l_2().border_color(rgb(0xd29922));
+            el = el.border_l_2().border_color(rgb(0xe5c07b));
         }
         if let Some((path, line_no)) = zed {
             el = el.on_click(move |event: &gpui::ClickEvent, _, _| {
@@ -199,7 +199,7 @@ impl PaneData<'_> {
         let path = self.files.get(file_ix).map(|f| f.path.clone());
         let mut container = div().w_full().flex().items_center();
         if in_comment_range {
-            container = container.border_l_2().border_color(rgb(0xd29922));
+            container = container.border_l_2().border_color(rgb(0xe5c07b));
         }
         // Comment + Zed anchor only on the right (head) column.
         let right_anchor = path.clone().map(|p| CommentAnchor {
@@ -242,8 +242,8 @@ impl PaneData<'_> {
                 .into_any_element();
         };
         let bg = match half.kind {
-            HalfKind::Added => Some(gpui::Hsla::from(rgb(0x2ea043)).opacity(0.13)),
-            HalfKind::Removed => Some(gpui::Hsla::from(rgb(0xf85149)).opacity(0.13)),
+            HalfKind::Added => Some(gpui::Hsla::from(rgb(0x98c379)).opacity(0.13)),
+            HalfKind::Removed => Some(gpui::Hsla::from(rgb(0xe06c75)).opacity(0.13)),
             HalfKind::Context => None,
         };
         let group_name = SharedString::from(format!("{}-{}", id.0, id.1));
@@ -298,7 +298,7 @@ impl PaneData<'_> {
                     .id((id.0, id.1 + 2_000_000))
                     .invisible()
                     .group_hover(group_name, |s| s.visible())
-                    .text_color(rgb(0x539bf5))
+                    .text_color(rgb(0x74ade8))
                     .cursor_pointer()
                     .child("+")
                     .on_click(move |_, window, cx| cb(anchor.clone(), window, cx)),
@@ -322,9 +322,9 @@ impl PaneData<'_> {
             return div().into_any_element();
         };
         let status_color = match file.status {
-            FileStatus::Added => rgb(0x3fb950),
-            FileStatus::Removed => rgb(0xf85149),
-            FileStatus::Renamed | FileStatus::Modified => rgb(0xd29922),
+            FileStatus::Added => rgb(0x98c379),
+            FileStatus::Removed => rgb(0xe06c75),
+            FileStatus::Renamed | FileStatus::Modified => rgb(0xe5c07b),
         };
         let marker = match file.status {
             FileStatus::Added => "A",
@@ -352,7 +352,7 @@ impl PaneData<'_> {
             .when_some(badge.filter(|c| *c > 0), |el, count| {
                 el.child(
                     div()
-                        .text_color(rgb(0xd29922))
+                        .text_color(rgb(0xe5c07b))
                         .whitespace_nowrap()
                         .child(SharedString::from(format!("💬{count}"))),
                 )
@@ -365,6 +365,35 @@ impl PaneData<'_> {
             )
             .into_any_element()
     }
+}
+
+/// A small initials-circle avatar, colored deterministically from the login.
+/// Cheap (no network) and reads like Zed's participant chips.
+pub fn avatar(login: &str) -> gpui::AnyElement {
+    let letter = login
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    // djb2 hash → hue.
+    let mut hash: u32 = 5381;
+    for b in login.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    let hue = (hash % 360) as f32 / 360.0;
+    div()
+        .w(px(18.))
+        .h(px(18.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(gpui::hsla(hue, 0.45, 0.45, 1.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(0xffffff))
+        .child(div().text_xs().child(SharedString::from(letter)))
+        .into_any_element()
 }
 
 /// The anchor a new comment on `line` would use.
@@ -382,7 +411,7 @@ pub fn outdated_header_el(count: usize) -> gpui::AnyElement {
         .px_3()
         .py_1()
         .text_sm()
-        .text_color(rgb(0xd29922))
+        .text_color(rgb(0xe5c07b))
         .child(SharedString::from(format!(
             "⚠ {count} outdated thread{} (code has changed since)",
             if count == 1 { "" } else { "s" }
@@ -390,20 +419,20 @@ pub fn outdated_header_el(count: usize) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// Maps a semantic highlight kind to a color (catppuccin-mocha-ish).
+/// Maps a semantic highlight kind to a color (One Dark, matching the theme).
 fn highlight_style(kind: syntax::Highlight) -> gpui::HighlightStyle {
     use syntax::Highlight as H;
     let color = match kind {
-        H::Keyword => rgb(0xcba6f7),
-        H::Function => rgb(0x89b4fa),
-        H::Type => rgb(0xf9e2af),
-        H::String => rgb(0xa6e3a1),
-        H::Number | H::Constant => rgb(0xfab387),
-        H::Comment => rgb(0x7f849c),
-        H::Operator => rgb(0x89dceb),
-        H::Punctuation => rgb(0xbac2de),
-        H::Property => rgb(0x89b4fa),
-        H::Variable => rgb(0xcdd6f4),
+        H::Keyword => rgb(0xc678dd),
+        H::Function => rgb(0x61afef),
+        H::Type => rgb(0xe5c07b),
+        H::String => rgb(0x98c379),
+        H::Number | H::Constant => rgb(0xd19a66),
+        H::Comment => rgb(0x5c6370),
+        H::Operator => rgb(0x56b6c2),
+        H::Punctuation => rgb(0xabb2bf),
+        H::Property => rgb(0xe06c75),
+        H::Variable => rgb(0xabb2bf),
     };
     gpui::HighlightStyle { color: Some(color.into()), ..Default::default() }
 }

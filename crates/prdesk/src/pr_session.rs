@@ -849,7 +849,7 @@ impl PrSessionView {
             panel = panel.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0xf85149))
+                    .text_color(rgb(0xe06c75))
                     .child(SharedString::from(format!(
                         "Failed to post: {err} — your text is preserved; try again."
                     ))),
@@ -924,7 +924,7 @@ impl PrSessionView {
             panel = panel.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0xf85149))
+                    .text_color(rgb(0xe06c75))
                     .child(SharedString::from(err.clone())),
             );
         }
@@ -1005,22 +1005,23 @@ impl PrSessionView {
             Some(conv) => {
                 for item in &conv.items {
                     let (label, color) = match item.kind {
-                        ConversationKind::Description => ("described", rgb(0x8a8f98)),
-                        ConversationKind::Comment => ("commented", rgb(0x539bf5)),
+                        ConversationKind::Description => ("described", rgb(0x828997)),
+                        ConversationKind::Comment => ("commented", rgb(0x74ade8)),
                         ConversationKind::Review(ReviewVerdict::Approve) => {
-                            ("approved", rgb(0x3fb950))
+                            ("approved", rgb(0x98c379))
                         }
                         ConversationKind::Review(ReviewVerdict::RequestChanges) => {
-                            ("requested changes", rgb(0xf85149))
+                            ("requested changes", rgb(0xe06c75))
                         }
                         ConversationKind::Review(ReviewVerdict::Comment) => {
-                            ("reviewed", rgb(0x539bf5))
+                            ("reviewed", rgb(0x74ade8))
                         }
                     };
                     let meta = div()
                         .flex()
                         .items_center()
                         .gap_2()
+                        .child(diff_pane::avatar(&item.author.login))
                         .child(
                             div()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1073,7 +1074,7 @@ impl PrSessionView {
                 composer = composer.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xf85149))
+                        .text_color(rgb(0xe06c75))
                         .child(SharedString::from(err.clone())),
                 );
             }
@@ -1312,7 +1313,7 @@ impl PrSessionView {
             CheckoutState::CheckingOut => {
                 bar = bar.child(
                     div()
-                        .text_color(rgb(0xd29922))
+                        .text_color(rgb(0xe5c07b))
                         .child("Checking out PR branch…"),
                 );
             }
@@ -1320,7 +1321,7 @@ impl PrSessionView {
                 bar = bar
                     .child(
                         div()
-                            .text_color(rgb(0xf85149))
+                            .text_color(rgb(0xe06c75))
                             .truncate()
                             .flex_1()
                             .child(SharedString::from(format!("Checkout failed: {err}"))),
@@ -1348,7 +1349,7 @@ impl PrSessionView {
                     bar = bar
                         .child(
                             div()
-                                .text_color(rgb(0x3fb950))
+                                .text_color(rgb(0x98c379))
                                 .whitespace_nowrap()
                                 .child("✓ on PR head — ⌘-click any line to open in Zed"),
                         )
@@ -1369,7 +1370,7 @@ impl PrSessionView {
                     if *dirty {
                         bar = bar.child(
                             div()
-                                .text_color(rgb(0xd29922))
+                                .text_color(rgb(0xe5c07b))
                                 .whitespace_nowrap()
                                 .child("working tree has changes"),
                         );
@@ -1540,10 +1541,10 @@ fn render_thread_card(
     } else {
         let mut badges = div().flex().items_center().gap_1();
         if thread.is_resolved {
-            badges = badges.child(small_tag("Resolved", rgb(0x3fb950).into()));
+            badges = badges.child(small_tag("Resolved", rgb(0x98c379).into()));
         }
         if outdated {
-            badges = badges.child(small_tag("Outdated", rgb(0xd29922).into()));
+            badges = badges.child(small_tag("Outdated", rgb(0xe5c07b).into()));
         }
         let mut header = div()
             .flex()
@@ -1612,6 +1613,7 @@ fn render_thread_card(
                 .flex()
                 .items_center()
                 .gap_2()
+                .child(diff_pane::avatar(&comment.author.login))
                 .child(
                     div()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1625,7 +1627,7 @@ fn render_thread_card(
                         .child(SharedString::from(relative_time(comment.created_at))),
                 );
             if comment.is_pending {
-                meta = meta.child(small_tag("Pending", rgb(0xd29922).into()));
+                meta = meta.child(small_tag("Pending", rgb(0xe5c07b).into()));
             }
             card = card.child(
                 div()
