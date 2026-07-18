@@ -4,7 +4,7 @@
       {
         "id": "PR_kwDOAbc123",
         "number": 1938,
-        "title": "feat(connectivity): single-source connectivity state",
+        "title": "feat: add example feature",
         "url": "https://github.com/octo-org/octo-app/pull/1938",
         "isDraft": false,
         "state": "OPEN",
@@ -31,21 +31,21 @@
             }
           ]
         },
-        "headRefName": "integration/example-branch",
+        "headRefName": "feature/example-branch",
         "headRefOid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
       },
       {
         "id": "PR_kwDOAbc456",
         "number": 42,
         "title": "chore: bump deps",
-        "url": "https://github.com/octo-org/octo-app/pull/42",
+        "url": "https://github.com/octo-org/octo-web/pull/42",
         "isDraft": true,
         "state": "OPEN",
         "updatedAt": "2026-07-10T08:00:00Z",
         "reviewDecision": null,
         "author": null,
         "repository": {
-          "name": "octo-app",
+          "name": "octo-web",
           "owner": {
             "login": "octo-org"
           }
