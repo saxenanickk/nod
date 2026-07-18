@@ -224,11 +224,38 @@ pub enum ConversationKind {
     Review(ReviewVerdict),
 }
 
-/// A PR's conversation: title plus the timeline, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub name: String,
+    /// Hex color without the leading `#`.
+    pub color: String,
+}
+
+/// A reviewer with their latest verdict, or `None` if only requested.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reviewer {
+    pub actor: Actor,
+    pub verdict: Option<ReviewVerdict>,
+}
+
+/// One CI check / status context on the PR's head commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    pub state: CheckState,
+    pub url: Option<String>,
+}
+
+/// A PR's conversation: title, the timeline (oldest first), and sidebar
+/// metadata (labels, reviewers, assignees, checks).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrConversation {
     pub title: String,
     pub items: Vec<ConversationItem>,
+    pub labels: Vec<Label>,
+    pub reviewers: Vec<Reviewer>,
+    pub assignees: Vec<Actor>,
+    pub checks: Vec<CheckRun>,
 }
 
 /// Live review/merge state fetched separately from the diff.

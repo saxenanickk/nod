@@ -5,6 +5,18 @@
       "body": "This PR adds differential updates.",
       "createdAt": "2026-07-01T09:00:00Z",
       "author": { "login": "saxenanickk", "avatarUrl": "https://avatars.githubusercontent.com/u/24573714?v=4" },
+      "labels": { "nodes": [ { "name": "enhancement", "color": "a2eeef" } ] },
+      "assignees": { "nodes": [ { "login": "saxenanickk", "avatarUrl": null } ] },
+      "reviewRequests": {
+        "nodes": [
+          { "requestedReviewer": { "__typename": "User", "login": "pending-person", "avatarUrl": null } }
+        ]
+      },
+      "latestReviews": {
+        "nodes": [
+          { "state": "APPROVED", "author": { "login": "reviewer", "avatarUrl": null } }
+        ]
+      },
       "comments": {
         "nodes": [
           {
@@ -33,6 +45,23 @@
             "state": "PENDING",
             "submittedAt": null,
             "author": { "login": "saxenanickk", "avatarUrl": null }
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "statusCheckRollup": {
+                "contexts": {
+                  "nodes": [
+                    { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://ci/build" },
+                    { "__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": "https://ci/test" },
+                    { "__typename": "StatusContext", "context": "cla", "state": "FAILURE", "targetUrl": "https://cla" }
+                  ]
+                }
+              }
+            }
           }
         ]
       }

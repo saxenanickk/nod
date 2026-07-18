@@ -4,9 +4,10 @@
 
 use chrono::{DateTime, Utc};
 use github_types::{
-    Actor, CheckState, ConversationItem, ConversationKind, DiffSide, FileChangeStatus,
-    MergeableState, NodeId, PendingReview, PrConversation, PrFile, PrNumber, PrReviewState, PrState,
-    PrSummary, RepoId, ReviewComment, ReviewDecision, ReviewThread, ReviewVerdict,
+    Actor, CheckRun, CheckState, ConversationItem, ConversationKind, DiffSide, FileChangeStatus,
+    Label, MergeableState, NodeId, PendingReview, PrConversation, PrFile, PrNumber, PrReviewState,
+    PrState, PrSummary, RepoId, Reviewer, ReviewComment, ReviewDecision, ReviewThread,
+    ReviewVerdict,
 };
 use serde::Deserialize;
 
@@ -228,8 +229,96 @@ pub struct ConversationPr {
     pub body: String,
     pub created_at: DateTime<Utc>,
     pub author: Option<GqlActor>,
+    pub labels: GqlLabels,
+    pub assignees: GqlActors,
+    pub review_requests: GqlReviewRequests,
+    pub latest_reviews: GqlLatestReviews,
     pub comments: GqlIssueComments,
     pub reviews: GqlReviews,
+    pub commits: GqlCommits,
+}
+
+#[derive(Deserialize)]
+pub struct GqlLabels {
+    pub nodes: Vec<GqlLabel>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlLabel {
+    pub name: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+#[derive(Deserialize)]
+pub struct GqlActors {
+    pub nodes: Vec<GqlActor>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlReviewRequests {
+    pub nodes: Vec<GqlReviewRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlReviewRequest {
+    pub requested_reviewer: Option<GqlActor>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlLatestReviews {
+    pub nodes: Vec<GqlLatestReview>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlLatestReview {
+    pub state: String,
+    pub author: Option<GqlActor>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlCommits {
+    pub nodes: Vec<GqlCommitNode>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlCommitNode {
+    pub commit: GqlRollupCommit,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlRollupCommit {
+    pub status_check_rollup: Option<GqlRollup>,
+}
+
+#[derive(Deserialize)]
+pub struct GqlRollup {
+    pub contexts: GqlContexts,
+}
+
+#[derive(Deserialize)]
+pub struct GqlContexts {
+    pub nodes: Vec<GqlContext>,
+}
+
+/// A check-run or a legacy status-context; distinguished by `__typename`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlContext {
+    #[serde(rename = "__typename")]
+    pub typename: String,
+    // CheckRun
+    pub name: Option<String>,
+    pub conclusion: Option<String>,
+    pub status: Option<String>,
+    pub details_url: Option<String>,
+    // StatusContext
+    pub context: Option<String>,
+    pub state: Option<String>,
+    pub target_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -308,7 +397,78 @@ impl From<ConversationPr> for PrConversation {
         }
         // Timeline order, oldest first (the description is always first).
         items.sort_by_key(|i| i.created_at);
-        PrConversation { title: pr.title, items }
+
+        let labels = pr
+            .labels
+            .nodes
+            .into_iter()
+            .map(|l| Label { name: l.name, color: l.color })
+            .collect();
+        let assignees = pr.assignees.nodes.into_iter().map(|a| actor_or_ghost(Some(a))).collect();
+
+        // Reviewers: those who submitted a verdict, plus still-requested ones.
+        let mut reviewers: Vec<Reviewer> = pr
+            .latest_reviews
+            .nodes
+            .into_iter()
+            .filter_map(|r| {
+                let verdict = match r.state.as_str() {
+                    "APPROVED" => Some(ReviewVerdict::Approve),
+                    "CHANGES_REQUESTED" => Some(ReviewVerdict::RequestChanges),
+                    "COMMENTED" => Some(ReviewVerdict::Comment),
+                    _ => None,
+                };
+                Some(Reviewer { actor: actor_or_ghost(r.author), verdict })
+            })
+            .collect();
+        for req in pr.review_requests.nodes {
+            if let Some(actor) = req.requested_reviewer {
+                let login = actor.login.clone();
+                if !reviewers.iter().any(|r| r.actor.login == login) {
+                    reviewers.push(Reviewer { actor: actor_or_ghost(Some(actor)), verdict: None });
+                }
+            }
+        }
+
+        let checks = pr
+            .commits
+            .nodes
+            .into_iter()
+            .next()
+            .and_then(|c| c.commit.status_check_rollup)
+            .map(|r| r.contexts.nodes.into_iter().filter_map(check_from_context).collect())
+            .unwrap_or_default();
+
+        PrConversation { title: pr.title, items, labels, reviewers, assignees, checks }
+    }
+}
+
+fn check_from_context(c: GqlContext) -> Option<CheckRun> {
+    if c.typename == "CheckRun" {
+        let name = c.name?;
+        // Not COMPLETED → still running.
+        let state = if c.status.as_deref() != Some("COMPLETED") {
+            CheckState::Pending
+        } else {
+            match c.conclusion.as_deref() {
+                Some("SUCCESS") => CheckState::Success,
+                Some("FAILURE") | Some("TIMED_OUT") | Some("STARTUP_FAILURE")
+                | Some("ACTION_REQUIRED") => CheckState::Failure,
+                // NEUTRAL / SKIPPED / CANCELLED and anything else: neutral.
+                _ => CheckState::Pending,
+            }
+        };
+        Some(CheckRun { name, state, url: c.details_url })
+    } else {
+        // StatusContext
+        let name = c.context?;
+        let state = match c.state.as_deref() {
+            Some("SUCCESS") => CheckState::Success,
+            Some("FAILURE") => CheckState::Failure,
+            Some("ERROR") => CheckState::Error,
+            _ => CheckState::Pending,
+        };
+        Some(CheckRun { name, state, url: c.target_url })
     }
 }
 
@@ -476,6 +636,28 @@ mod tests {
             ConversationKind::Review(ReviewVerdict::Approve)
         );
         assert_eq!(conv.items[2].body_markdown, "Looks good now, thanks!");
+
+        // Metadata.
+        assert_eq!(conv.labels.len(), 1);
+        assert_eq!(conv.labels[0].name, "enhancement");
+        assert_eq!(conv.assignees.len(), 1);
+        // Reviewers: the approver plus the still-requested pending reviewer.
+        assert_eq!(conv.reviewers.len(), 2);
+        assert!(
+            conv.reviewers
+                .iter()
+                .any(|r| r.actor.login == "reviewer" && r.verdict == Some(ReviewVerdict::Approve))
+        );
+        assert!(
+            conv.reviewers
+                .iter()
+                .any(|r| r.actor.login == "pending-person" && r.verdict.is_none())
+        );
+        // Checks: build success, test in-progress (pending), cla failure.
+        assert_eq!(conv.checks.len(), 3);
+        assert_eq!(conv.checks[0].state, github_types::CheckState::Success);
+        assert_eq!(conv.checks[1].state, github_types::CheckState::Pending);
+        assert_eq!(conv.checks[2].state, github_types::CheckState::Failure);
     }
 
     #[test]

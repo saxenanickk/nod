@@ -9,8 +9,8 @@ use diff_kit::{
 };
 use github_client::GithubClient;
 use github_types::{
-    CommentAnchor, ConversationKind, DiffSide, MergeMethod, MergeableState, NodeId, PrConversation,
-    PrReviewState, PrSummary, ReviewThread, ReviewVerdict,
+    CheckState, CommentAnchor, ConversationKind, DiffSide, MergeMethod, MergeableState, NodeId,
+    PrConversation, PrReviewState, PrSummary, ReviewThread, ReviewVerdict,
 };
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -988,8 +988,129 @@ impl PrSessionView {
     /// The right-side conversation panel: the PR timeline (description, issue
     /// comments, review summaries), a composer to post, and a jump-list of the
     /// line-comment threads.
+    /// The PR sidebar metadata: checks, reviewers, assignees, labels.
+    fn render_pr_metadata(
+        &self,
+        conv: &PrConversation,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let muted = cx.theme().muted_foreground;
+        let mut block = div().flex().flex_col().gap_2();
+
+        // Checks.
+        if !conv.checks.is_empty() {
+            let passing = conv.checks.iter().filter(|c| c.state == CheckState::Success).count();
+            let mut checks = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(SharedString::from(format!(
+                        "Checks — {passing}/{} passing",
+                        conv.checks.len()
+                    ))),
+            );
+            for check in conv.checks.iter().take(12) {
+                let (icon, color) = match check.state {
+                    CheckState::Success => ("✓", rgb(0x98c379)),
+                    CheckState::Failure | CheckState::Error => ("✗", rgb(0xe06c75)),
+                    CheckState::Pending => ("•", rgb(0xe5c07b)),
+                };
+                let url = check.url.clone();
+                let row = div()
+                    .id(SharedString::from(format!("check-{}", check.name)))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .when(url.is_some(), |r| {
+                        r.cursor_pointer().hover(|s| s.text_color(rgb(0x74ade8)))
+                    })
+                    .when_some(url, |r, url| r.on_click(move |_, _, cx| cx.open_url(&url)))
+                    .child(div().text_color(color).child(icon))
+                    .child(div().truncate().child(SharedString::from(check.name.clone())));
+                checks = checks.child(row);
+            }
+            block = block.child(checks);
+        }
+
+        // Reviewers.
+        if !conv.reviewers.is_empty() {
+            let mut rv = div().flex().flex_col().gap_1().child(
+                div().text_sm().text_color(muted).child("Reviewers"),
+            );
+            for reviewer in &conv.reviewers {
+                let (label, color) = match reviewer.verdict {
+                    Some(ReviewVerdict::Approve) => ("approved", rgb(0x98c379)),
+                    Some(ReviewVerdict::RequestChanges) => ("changes", rgb(0xe06c75)),
+                    Some(ReviewVerdict::Comment) => ("commented", rgb(0x74ade8)),
+                    None => ("pending", rgb(0x828997)),
+                };
+                rv = rv.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .child(diff_pane::avatar(&reviewer.actor.login))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(reviewer.actor.login.clone())),
+                        )
+                        .child(div().text_color(color).child(label)),
+                );
+            }
+            block = block.child(rv);
+        }
+
+        // Assignees.
+        if !conv.assignees.is_empty() {
+            let names = conv
+                .assignees
+                .iter()
+                .map(|a| a.login.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            block = block.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(div().text_color(muted).child("Assignees"))
+                    .child(div().flex_1().min_w_0().truncate().child(SharedString::from(names))),
+            );
+        }
+
+        // Labels.
+        if !conv.labels.is_empty() {
+            let mut labels = div().flex().flex_wrap().gap_1();
+            for label in &conv.labels {
+                let color = u32::from_str_radix(&label.color, 16).unwrap_or(0x828997);
+                let hsla = gpui::Hsla::from(rgb(color));
+                labels = labels.child(
+                    div()
+                        .px_1()
+                        .rounded_md()
+                        .text_xs()
+                        .bg(hsla.opacity(0.2))
+                        .text_color(hsla)
+                        .child(SharedString::from(label.name.clone())),
+                );
+            }
+            block = block.child(labels);
+        }
+
+        block
+            .child(div().h(px(1.)).bg(cx.theme().border).my_1())
+    }
+
     fn render_conversation_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut timeline = div().flex().flex_col().gap_2().p_3();
+        if let Some(conv) = &self.conversation {
+            timeline = timeline.child(self.render_pr_metadata(conv, cx));
+        }
         timeline = timeline.child(
             div().font_weight(gpui::FontWeight::BOLD).child("Conversation"),
         );

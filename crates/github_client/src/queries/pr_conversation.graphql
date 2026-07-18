@@ -8,6 +8,38 @@ query PrConversation($owner: String!, $name: String!, $number: Int!) {
         login
         avatarUrl
       }
+      labels(first: 20) {
+        nodes {
+          name
+          color
+        }
+      }
+      assignees(first: 20) {
+        nodes {
+          login
+          avatarUrl
+        }
+      }
+      reviewRequests(first: 20) {
+        nodes {
+          requestedReviewer {
+            __typename
+            ... on User {
+              login
+              avatarUrl
+            }
+          }
+        }
+      }
+      latestReviews(first: 20) {
+        nodes {
+          state
+          author {
+            login
+            avatarUrl
+          }
+        }
+      }
       comments(first: 100) {
         nodes {
           body
@@ -26,6 +58,30 @@ query PrConversation($owner: String!, $name: String!, $number: Int!) {
           author {
             login
             avatarUrl
+          }
+        }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    conclusion
+                    status
+                    detailsUrl
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+              }
+            }
           }
         }
       }
