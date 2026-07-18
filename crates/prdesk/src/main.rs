@@ -2,6 +2,7 @@
 
 mod config;
 mod diff_pane;
+mod local_session;
 mod pr_list;
 mod pr_session;
 mod util;
@@ -22,6 +23,11 @@ actions!(prdesk, [Quit]);
 
 fn main() {
     let config = config::load_or_init();
+    // `prdesk <path>` opens that local repo's review directly.
+    let open_local = std::env::args().nth(1).and_then(|arg| {
+        let path = std::path::PathBuf::from(&arg);
+        path.is_dir().then(|| std::fs::canonicalize(&path).unwrap_or(path))
+    });
 
     Application::new()
         .with_assets(gpui_component_assets::Assets)
@@ -60,6 +66,9 @@ fn main() {
                 },
                 |window, cx| {
                     let view = cx.new(|cx| Workspace::new(config, cx));
+                    if let Some(path) = open_local {
+                        view.update(cx, |ws, cx| ws.open_local(path, window, cx));
+                    }
                     window.focus(&view.read(cx).focus_handle);
                     cx.new(|cx| Root::new(view, window, cx))
                 },

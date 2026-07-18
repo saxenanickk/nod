@@ -1,6 +1,8 @@
-//! Root view: switches between the PR list and an open PR session.
+//! Root view: switches between the PR list, an open PR session, and a local
+//! review session.
 
 use crate::config::Config;
+use crate::local_session::{LocalSessionEvent, LocalSessionView};
 use crate::pr_list::{PrListEvent, PrListView};
 use crate::pr_session::{PrSessionView, SessionEvent};
 use github_client::GithubClient;
@@ -8,14 +10,17 @@ use github_types::PrSummary;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Subscription, Window, div, prelude::*,
 };
+use std::path::PathBuf;
 
 pub struct Workspace {
     client: GithubClient,
     config: Config,
     pr_list: Entity<PrListView>,
     session: Option<Entity<PrSessionView>>,
+    local: Option<Entity<LocalSessionView>>,
     _list_subscription: Subscription,
     _session_subscription: Option<Subscription>,
+    _local_subscription: Option<Subscription>,
     pub focus_handle: FocusHandle,
 }
 
@@ -35,8 +40,10 @@ impl Workspace {
             config,
             pr_list,
             session: None,
+            local: None,
             _list_subscription: list_subscription,
             _session_subscription: None,
+            _local_subscription: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -58,6 +65,23 @@ impl Workspace {
         self.session = Some(session);
         cx.notify();
     }
+
+    pub fn open_local(&mut self, clone: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let local = cx.new(|cx| LocalSessionView::new(clone, window, cx));
+        self._local_subscription = Some(cx.subscribe(
+            &local,
+            |this, _, event: &LocalSessionEvent, cx| match event {
+                LocalSessionEvent::Close => {
+                    this.local = None;
+                    this._local_subscription = None;
+                    cx.notify();
+                }
+            },
+        ));
+        window.focus(&local.read(cx).focus_handle);
+        self.local = Some(local);
+        cx.notify();
+    }
 }
 
 impl Focusable for Workspace {
@@ -68,9 +92,10 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let content: gpui::AnyElement = match &self.session {
-            Some(session) => session.clone().into_any_element(),
-            None => self.pr_list.clone().into_any_element(),
+        let content: gpui::AnyElement = match (&self.local, &self.session) {
+            (Some(local), _) => local.clone().into_any_element(),
+            (None, Some(session)) => session.clone().into_any_element(),
+            (None, None) => self.pr_list.clone().into_any_element(),
         };
         div()
             .track_focus(&self.focus_handle)
