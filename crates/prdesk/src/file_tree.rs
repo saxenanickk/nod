@@ -71,6 +71,16 @@ pub fn build_rows(files: &[FileDiff], collapsed: &HashSet<String>, tree: bool) -
     out
 }
 
+/// Repo-relative paths of every file in `folder`'s subtree (recursive).
+pub fn files_under(files: &[FileDiff], folder: &str) -> Vec<String> {
+    let prefix = format!("{folder}/");
+    files
+        .iter()
+        .filter(|f| f.path.starts_with(&prefix))
+        .map(|f| f.path.clone())
+        .collect()
+}
+
 fn flatten(
     node: &Node,
     prefix: &str,

@@ -413,6 +413,60 @@ impl PrSessionView {
         cx.notify();
     }
 
+    /// Marks every file under `folder` as viewed (or unviewed, if all already
+    /// are), optimistically and then on GitHub. Resyncs from the server if any
+    /// per-file mutation fails.
+    fn toggle_folder_viewed(&mut self, folder: String, cx: &mut Context<Self>) {
+        let paths = file_tree::files_under(&self.files, &folder);
+        if paths.is_empty() {
+            return;
+        }
+        let target = !paths.iter().all(|p| self.viewed.contains(p));
+        for p in &paths {
+            if target {
+                self.viewed.insert(p.clone());
+            } else {
+                self.viewed.remove(p);
+            }
+        }
+        cx.notify();
+        let node = self.pr.node_id.clone();
+        if node.0.is_empty() {
+            return;
+        }
+        let client = self.client.clone();
+        let resync_client = self.client.clone();
+        let repo = self.pr.repo.clone();
+        let number = self.pr.number;
+        cx.spawn(async move |view, cx| {
+            let ok = cx
+                .background_spawn(async move {
+                    let mut ok = true;
+                    for p in &paths {
+                        if client.set_file_viewed(&node, p, target).is_err() {
+                            ok = false;
+                        }
+                    }
+                    ok
+                })
+                .await;
+            if !ok {
+                let latest = cx
+                    .background_spawn(async move { resync_client.pr_viewed_files(&repo, number).ok() })
+                    .await;
+                if let Some(latest) = latest {
+                    view.update(cx, |this, cx| {
+                        this.viewed =
+                            latest.into_iter().filter(|(_, v)| *v).map(|(p, _)| p).collect();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
     fn toggle_tree_mode(&mut self, cx: &mut Context<Self>) {
         self.tree_mode = !self.tree_mode;
         self.rebuild_sidebar();
@@ -424,6 +478,19 @@ impl PrSessionView {
         // Row heights change with wrapping; force the list to re-measure.
         self.list_state.reset(self.active_len());
         cx.notify();
+    }
+
+    /// Aggregate viewed state of a folder's files, for its checkbox.
+    fn folder_check(&self, folder: &str) -> diff_pane::FolderCheck {
+        let paths = file_tree::files_under(&self.files, folder);
+        let viewed = paths.iter().filter(|p| self.viewed.contains(*p)).count();
+        if paths.is_empty() || viewed == 0 {
+            diff_pane::FolderCheck::Unchecked
+        } else if viewed == paths.len() {
+            diff_pane::FolderCheck::Checked
+        } else {
+            diff_pane::FolderCheck::Partial
+        }
     }
 
     /// A minimal pane for rendering sidebar rows (no comment/Zed hooks needed).
@@ -444,7 +511,11 @@ impl PrSessionView {
         let on_toggle_folder: diff_pane::ToggleFolderFn = Rc::new(move |path, _w, cx| {
             e3.update(cx, |this, cx| this.toggle_folder(path, cx));
         });
-        SidebarCallbacks { on_select, on_toggle_viewed, on_toggle_folder }
+        let e4 = entity.clone();
+        let on_toggle_folder_viewed: diff_pane::ToggleFolderFn = Rc::new(move |path, _w, cx| {
+            e4.update(cx, |this, cx| this.toggle_folder_viewed(path, cx));
+        });
+        SidebarCallbacks { on_select, on_toggle_viewed, on_toggle_folder, on_toggle_folder_viewed }
     }
 
     /// Renders one sidebar row (folder header or file entry) by index.
@@ -459,17 +530,21 @@ impl PrSessionView {
         };
         let pane = self.sidebar_pane();
         match row {
-            SidebarRow::Folder { depth, name, path, file_count, collapsed } => pane
-                .render_folder_row(
+            SidebarRow::Folder { depth, name, path, file_count, collapsed } => {
+                let check = self.folder_check(path);
+                pane.render_folder_row(
                     ix,
                     *depth,
                     name,
                     path.clone(),
                     *file_count,
                     *collapsed,
+                    check,
                     &cb.on_toggle_folder,
+                    &cb.on_toggle_folder_viewed,
                     cx,
-                ),
+                )
+            }
             SidebarRow::File { depth, file_ix } => {
                 let (adds, dels) = self.stats.get(*file_ix).copied().unwrap_or((0, 0));
                 let file = self.files.get(*file_ix);

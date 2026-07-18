@@ -37,12 +37,25 @@ pub type ToggleViewedFn = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Sidebar callback: collapse/expand a folder by its full path.
 pub type ToggleFolderFn = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
+/// Aggregate "viewed" state of a folder's files, for its checkbox.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FolderCheck {
+    /// No file under the folder is viewed.
+    Unchecked,
+    /// Some but not all files under the folder are viewed.
+    Partial,
+    /// Every file under the folder is viewed.
+    Checked,
+}
+
 /// Click handlers the sidebar rows need, supplied by the session view.
 #[derive(Clone)]
 pub struct SidebarCallbacks {
     pub on_select: SelectFileFn,
     pub on_toggle_viewed: ToggleViewedFn,
     pub on_toggle_folder: ToggleFolderFn,
+    /// Mark/unmark every file under a folder as viewed.
+    pub on_toggle_folder_viewed: ToggleFolderFn,
 }
 
 /// The borrowed state the shared renderers need, plus optional PR-only hooks.
@@ -456,8 +469,9 @@ impl PaneData<'_> {
             .into_any_element()
     }
 
-    /// A collapsible folder header for the tree sidebar. Clicking anywhere on
-    /// the row toggles the folder.
+    /// A collapsible folder header for the tree sidebar. Two click zones: the
+    /// checkbox marks/unmarks every file under the folder as viewed, the rest
+    /// of the row collapses/expands it.
     #[allow(clippy::too_many_arguments)]
     pub fn render_folder_row(
         &self,
@@ -467,12 +481,76 @@ impl PaneData<'_> {
         path: String,
         file_count: usize,
         collapsed: bool,
+        checked: FolderCheck,
         on_toggle: &ToggleFolderFn,
+        on_toggle_viewed: &ToggleFolderFn,
         cx: &App,
     ) -> gpui::AnyElement {
-        let on_toggle = on_toggle.clone();
+        let checkbox = {
+            let on_toggle_viewed = on_toggle_viewed.clone();
+            let path = path.clone();
+            let (border, glyph): (gpui::Hsla, Option<&str>) = match checked {
+                FolderCheck::Checked => (gpui::Hsla::from(rgb(0x98c379)), Some("✓")),
+                FolderCheck::Partial => (gpui::Hsla::from(rgb(0x98c379)), Some("–")),
+                FolderCheck::Unchecked => (cx.theme().border, None),
+            };
+            let mut check = div()
+                .id(("folder-viewed", key))
+                .flex_shrink_0()
+                .w(px(15.))
+                .h(px(15.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(border)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| on_toggle_viewed(path.clone(), window, cx));
+            if checked == FolderCheck::Checked {
+                check = check.bg(gpui::Hsla::from(rgb(0x98c379)).opacity(0.2));
+            }
+            if let Some(glyph) = glyph {
+                check = check.child(div().text_xs().text_color(rgb(0x98c379)).child(glyph));
+            }
+            check
+        };
+
+        let collapse = {
+            let on_toggle = on_toggle.clone();
+            div()
+                .id(("folder", key))
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .on_click(move |_, window, cx| on_toggle(path.clone(), window, cx))
+                .child(
+                    div()
+                        .w(px(12.))
+                        .flex_shrink_0()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if collapsed { "▸" } else { "▾" }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(SharedString::from(name.to_string())),
+                )
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .child(SharedString::from(file_count.to_string())),
+                )
+        };
+
         div()
-            .id(("folder", key))
             .flex()
             .items_center()
             .gap_1()
@@ -480,30 +558,9 @@ impl PaneData<'_> {
             .pl(px(8. + depth as f32 * 12.))
             .pr_2()
             .text_sm()
-            .cursor_pointer()
             .hover(|el| el.bg(cx.theme().accent))
-            .on_click(move |_, window, cx| on_toggle(path.clone(), window, cx))
-            .child(
-                div()
-                    .w(px(12.))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if collapsed { "▸" } else { "▾" }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(SharedString::from(name.to_string())),
-            )
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .whitespace_nowrap()
-                    .child(SharedString::from(file_count.to_string())),
-            )
+            .child(checkbox)
+            .child(collapse)
             .into_any_element()
     }
 }
