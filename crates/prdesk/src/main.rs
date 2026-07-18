@@ -2,6 +2,7 @@
 
 mod config;
 mod diff_pane;
+mod file_tree;
 mod local_session;
 mod pr_list;
 mod pr_session;

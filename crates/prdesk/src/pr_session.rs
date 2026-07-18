@@ -2,7 +2,8 @@
 //! comment threads rendered inline at their anchor lines.
 
 use crate::config::{self, Config};
-use crate::diff_pane::{self, CODE_INDENT, MONO, PaneData, ViewMode};
+use crate::diff_pane::{self, CODE_INDENT, MONO, PaneData, SidebarCallbacks, ViewMode};
+use crate::file_tree::{self, SidebarRow};
 use crate::util::relative_time;
 use diff_kit::{
     DiffRow, FileDiff, LayoutOptions, SplitRow, layout_split, layout_unified,
@@ -68,6 +69,9 @@ struct LoadedDiff {
     threads: Vec<ReviewThread>,
     review_state: Option<PrReviewState>,
     conversation: Option<PrConversation>,
+    /// Paths the viewer has marked "viewed" on GitHub (synced with the web UI
+    /// and the VS Code extension).
+    viewed: HashSet<String>,
 }
 
 /// The finish-review drawer: a summary box + verdict choice.
@@ -116,6 +120,16 @@ pub struct PrSessionView {
     show_resolved: bool,
     /// Resolved threads the user expanded back open.
     expanded: HashSet<String>,
+    /// Files the viewer has marked "viewed" (server-side GitHub state).
+    viewed: HashSet<String>,
+    /// Folder paths collapsed in the tree sidebar.
+    collapsed_folders: HashSet<String>,
+    /// Sidebar shows a folder tree (vs a flat file list).
+    tree_mode: bool,
+    /// Soft-wrap long code lines in the diff.
+    wrap: bool,
+    /// Precomputed sidebar rows (folders + files) for the current mode.
+    sidebar_rows: Vec<SidebarRow>,
     selected_file: Option<usize>,
     list_state: ListState,
     sidebar_scroll: UniformListScrollHandle,
@@ -166,6 +180,11 @@ impl PrSessionView {
             header_rows: Vec::new(),
             show_resolved: true,
             expanded: HashSet::new(),
+            viewed: HashSet::new(),
+            collapsed_folders: HashSet::new(),
+            tree_mode: true,
+            wrap: true,
+            sidebar_rows: Vec::new(),
             selected_file: None,
             list_state: ListState::new(0, ListAlignment::Top, px(512.)),
             sidebar_scroll: UniformListScrollHandle::new(),
@@ -313,6 +332,7 @@ impl PrSessionView {
                         }
                         this.review_state = loaded.review_state;
                         this.conversation = loaded.conversation;
+                        this.viewed = loaded.viewed;
                         this.load = SessionLoad::Ready;
                         this.relayout();
                     }
@@ -336,7 +356,173 @@ impl PrSessionView {
         self.rows = layout_unified(&self.files, &self.threads, opts);
         self.split_rows = layout_split(&self.files, &self.threads, opts);
         self.recompute_header_rows();
+        self.rebuild_sidebar();
         self.list_state.reset(self.active_len());
+    }
+
+    /// Rebuilds the sidebar rows from the current files, collapse set, and mode.
+    fn rebuild_sidebar(&mut self) {
+        self.sidebar_rows = file_tree::build_rows(&self.files, &self.collapsed_folders, self.tree_mode);
+    }
+
+    /// Toggles a file's "viewed" checkbox, optimistically and then on GitHub
+    /// (so it syncs with the web UI / VS Code). Reverts on failure.
+    fn toggle_viewed(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        let Some(file) = self.files.get(file_ix) else {
+            return;
+        };
+        let path = file.path.clone();
+        let now_viewed = !self.viewed.contains(&path);
+        if now_viewed {
+            self.viewed.insert(path.clone());
+        } else {
+            self.viewed.remove(&path);
+        }
+        cx.notify();
+        let node = self.pr.node_id.clone();
+        if node.0.is_empty() {
+            return; // PR node id not loaded yet; keep the local toggle only.
+        }
+        let client = self.client.clone();
+        let req_path = path.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { client.set_file_viewed(&node, &req_path, now_viewed) })
+                .await;
+            if result.is_err() {
+                view.update(cx, |this, cx| {
+                    // Revert the optimistic change.
+                    if now_viewed {
+                        this.viewed.remove(&path);
+                    } else {
+                        this.viewed.insert(path);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.collapsed_folders.remove(&path) {
+            self.collapsed_folders.insert(path);
+        }
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn toggle_tree_mode(&mut self, cx: &mut Context<Self>) {
+        self.tree_mode = !self.tree_mode;
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.wrap = !self.wrap;
+        // Row heights change with wrapping; force the list to re-measure.
+        self.list_state.reset(self.active_len());
+        cx.notify();
+    }
+
+    /// A minimal pane for rendering sidebar rows (no comment/Zed hooks needed).
+    fn sidebar_pane(&self) -> PaneData<'_> {
+        PaneData { files: &self.files, zed_target: None, add_comment: None, wrap: self.wrap }
+    }
+
+    fn sidebar_callbacks(&self, entity: &Entity<Self>) -> SidebarCallbacks {
+        let e1 = entity.clone();
+        let on_select: diff_pane::SelectFileFn = Rc::new(move |ix, _w, cx| {
+            e1.update(cx, |this, cx| this.select_file(ix, cx));
+        });
+        let e2 = entity.clone();
+        let on_toggle_viewed: diff_pane::ToggleViewedFn = Rc::new(move |ix, _w, cx| {
+            e2.update(cx, |this, cx| this.toggle_viewed(ix, cx));
+        });
+        let e3 = entity.clone();
+        let on_toggle_folder: diff_pane::ToggleFolderFn = Rc::new(move |path, _w, cx| {
+            e3.update(cx, |this, cx| this.toggle_folder(path, cx));
+        });
+        SidebarCallbacks { on_select, on_toggle_viewed, on_toggle_folder }
+    }
+
+    /// Renders one sidebar row (folder header or file entry) by index.
+    fn render_sidebar_item(
+        &self,
+        ix: usize,
+        cb: &SidebarCallbacks,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let Some(row) = self.sidebar_rows.get(ix) else {
+            return div().into_any_element();
+        };
+        let pane = self.sidebar_pane();
+        match row {
+            SidebarRow::Folder { depth, name, path, file_count, collapsed } => pane
+                .render_folder_row(
+                    ix,
+                    *depth,
+                    name,
+                    path.clone(),
+                    *file_count,
+                    *collapsed,
+                    &cb.on_toggle_folder,
+                    cx,
+                ),
+            SidebarRow::File { depth, file_ix } => {
+                let (adds, dels) = self.stats.get(*file_ix).copied().unwrap_or((0, 0));
+                let file = self.files.get(*file_ix);
+                let badge = file.map(|file| {
+                    self.threads
+                        .iter()
+                        .filter(|t| t.path == file.path && !t.is_resolved)
+                        .count()
+                });
+                let viewed = file.map(|f| self.viewed.contains(&f.path)).unwrap_or(false);
+                pane.render_file_row(
+                    *file_ix,
+                    ix,
+                    *depth,
+                    adds,
+                    dels,
+                    self.selected_file == Some(*file_ix),
+                    viewed,
+                    badge,
+                    cb,
+                    cx,
+                )
+            }
+        }
+    }
+
+    /// The sidebar's small header: reviewed progress + tree/flat toggle.
+    fn render_sidebar_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let reviewed = self.files.iter().filter(|f| self.viewed.contains(&f.path)).count();
+        let total = self.files.len();
+        let tree_mode = self.tree_mode;
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(format!("{reviewed}/{total} reviewed"))),
+            )
+            .child(
+                Button::new("sidebar-tree")
+                    .label(if tree_mode { "Tree" } else { "Flat" })
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_tree_mode(cx))),
+            )
     }
 
     fn active_len(&self) -> usize {
@@ -1350,6 +1536,14 @@ impl PrSessionView {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_view_mode(cx))),
             )
             .child(
+                Button::new("toggle-wrap")
+                    .label("Wrap")
+                    .xsmall()
+                    .when(self.wrap, |b| b.primary())
+                    .when(!self.wrap, |b| b.ghost())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
+            )
+            .child(
                 Button::new("toggle-resolved")
                     .label(if self.show_resolved {
                         "Hide resolved"
@@ -1522,25 +1716,6 @@ impl PrSessionView {
         bar
     }
 
-    /// A sidebar file row with the PR-specific unresolved-comment badge.
-    fn render_sidebar_row(&self, file_ix: usize, entity: &Entity<Self>, cx: &App) -> gpui::AnyElement {
-        let (adds, dels) = self.stats.get(file_ix).copied().unwrap_or((0, 0));
-        let badge = self.files.get(file_ix).map(|file| {
-            self.threads
-                .iter()
-                .filter(|t| t.path == file.path && !t.is_resolved)
-                .count()
-        });
-        self.pane(entity).render_sidebar_row(
-            file_ix,
-            adds,
-            dels,
-            self.selected_file == Some(file_ix),
-            badge,
-            cx,
-        )
-    }
-
     /// Builds the shared diff pane view over this session's data, wired to
     /// open the comment composer via the `+` affordance.
     fn pane<'a>(&'a self, entity: &Entity<Self>) -> PaneData<'a> {
@@ -1552,6 +1727,7 @@ impl PrSessionView {
             files: &self.files,
             zed_target: self.zed_target(),
             add_comment: Some(add_comment),
+            wrap: self.wrap,
         }
     }
 
@@ -1908,13 +2084,18 @@ fn fetch_diff(client: &GithubClient, pr: &PrSummary) -> Result<LoadedDiff, Strin
     // here shouldn't block reading the diff.
     let review_state = client.pr_review_state(&pr.repo, pr.number).ok();
     let conversation = client.pr_conversation(&pr.repo, pr.number).ok();
+    // Best-effort: the per-file viewed checkboxes GitHub shares with its web UI.
+    let viewed = client
+        .pr_viewed_files(&pr.repo, pr.number)
+        .map(|files| files.into_iter().filter(|(_, v)| *v).map(|(p, _)| p).collect())
+        .unwrap_or_default();
     let mut files = Vec::with_capacity(pr_files.len());
     let mut stats = Vec::with_capacity(pr_files.len());
     for f in &pr_files {
         files.push(diff_kit::file_diff_from_pr_file(f).map_err(|e| format!("{}: {e}", f.path))?);
         stats.push((f.additions, f.deletions));
     }
-    Ok(LoadedDiff { files, stats, threads, review_state, conversation })
+    Ok(LoadedDiff { files, stats, threads, review_state, conversation, viewed })
 }
 
 impl gpui::EventEmitter<SessionEvent> for PrSessionView {}
@@ -1948,7 +2129,8 @@ impl Render for PrSessionView {
                 let entity = cx.entity();
                 let sidebar_entity = entity.clone();
                 let row_entity = entity.clone();
-                let file_count = self.files.len();
+                let sidebar_len = self.sidebar_rows.len();
+                let callbacks = self.sidebar_callbacks(&entity);
                 div()
                     .flex()
                     .flex_1()
@@ -1957,36 +2139,20 @@ impl Render for PrSessionView {
                         div()
                             .w(px(280.))
                             .flex_shrink_0()
+                            .flex()
+                            .flex_col()
                             .border_r_1()
                             .border_color(cx.theme().border)
+                            .child(self.render_sidebar_header(cx))
                             .child(
-                                uniform_list(
-                                    "file-sidebar",
-                                    file_count,
-                                    move |range, _window, cx| {
-                                        let this = sidebar_entity.read(cx);
-                                        range
-                                            .map(|ix| {
-                                                let row =
-                                                    this.render_sidebar_row(ix, &sidebar_entity, cx);
-                                                div()
-                                                    .id(("file", ix))
-                                                    .on_click({
-                                                        let entity = sidebar_entity.clone();
-                                                        move |_, _, cx| {
-                                                            entity.update(cx, |this, cx| {
-                                                                this.select_file(ix, cx)
-                                                            });
-                                                        }
-                                                    })
-                                                    .child(row)
-                                                    .into_any_element()
-                                            })
-                                            .collect()
-                                    },
-                                )
+                                uniform_list("file-sidebar", sidebar_len, move |range, _window, cx| {
+                                    let this = sidebar_entity.read(cx);
+                                    range
+                                        .map(|ix| this.render_sidebar_item(ix, &callbacks, cx))
+                                        .collect()
+                                })
                                 .track_scroll(self.sidebar_scroll.clone())
-                                .h_full(),
+                                .flex_1(),
                             ),
                     )
                     .child(

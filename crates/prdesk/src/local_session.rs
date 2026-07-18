@@ -2,13 +2,18 @@
 //! PR involved. Read-only: it renders through the shared [`crate::diff_pane`]
 //! with no comment hooks, so you view and then jump to Zed to edit.
 
-use crate::diff_pane::{PaneData, ViewMode};
+use crate::diff_pane::{self, PaneData, SidebarCallbacks, ViewMode};
+use crate::file_tree::{self, SidebarRow};
 use crate::pr_session::{
     DismissOverlay, NextFile, PrevFile, RefreshSession, SESSION_KEY_CONTEXT,
 };
 use diff_kit::{
     DiffLine, DiffRow, FileDiff, LayoutOptions, SplitRow, layout_split, layout_unified,
 };
+use github_client::GithubClient;
+use github_types::NodeId;
+use std::collections::HashSet;
+use std::rc::Rc;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
     SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
@@ -48,6 +53,10 @@ struct LoadedLocal {
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
     branch_pr: Option<(github_types::RepoId, u64, Option<String>)>,
+    /// The branch PR's node id (for viewed-state mutations), when it has a PR.
+    pr_node: Option<NodeId>,
+    /// Paths already marked "viewed" on the branch's PR (empty when no PR).
+    viewed: HashSet<String>,
 }
 
 pub struct LocalSessionView {
@@ -60,6 +69,14 @@ pub struct LocalSessionView {
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
     branch_pr: Option<(github_types::RepoId, u64, Option<String>)>,
+    branch_pr_node: Option<NodeId>,
+    /// Files marked "viewed" (backed by the branch's PR on GitHub when it has
+    /// one; session-local otherwise).
+    viewed: HashSet<String>,
+    collapsed_folders: HashSet<String>,
+    tree_mode: bool,
+    wrap: bool,
+    sidebar_rows: Vec<SidebarRow>,
     rows: Vec<DiffRow>,
     split_rows: Vec<SplitRow>,
     view_mode: ViewMode,
@@ -94,6 +111,12 @@ impl LocalSessionView {
             repo_label,
             branch: String::new(),
             branch_pr: None,
+            branch_pr_node: None,
+            viewed: HashSet::new(),
+            collapsed_folders: HashSet::new(),
+            tree_mode: true,
+            wrap: true,
+            sidebar_rows: Vec::new(),
             base_input,
             mode: LocalMode::BranchVsBase,
             load: LocalLoad::Loading,
@@ -217,6 +240,8 @@ impl LocalSessionView {
                         this.files = loaded.files;
                         this.stats = loaded.stats;
                         this.branch_pr = loaded.branch_pr;
+                        this.branch_pr_node = loaded.pr_node;
+                        this.viewed = loaded.viewed;
                         this.load = LocalLoad::Ready;
                         this.relayout();
                     }
@@ -235,7 +260,162 @@ impl LocalSessionView {
         self.rows = layout_unified(&self.files, &[], opts);
         self.split_rows = layout_split(&self.files, &[], opts);
         self.recompute_header_rows();
+        self.rebuild_sidebar();
         self.list_state.reset(self.active_len());
+    }
+
+    fn rebuild_sidebar(&mut self) {
+        self.sidebar_rows = file_tree::build_rows(&self.files, &self.collapsed_folders, self.tree_mode);
+    }
+
+    /// Toggles a file's "viewed" checkbox. When this branch maps to a PR the
+    /// change is persisted to GitHub (so it syncs with the web UI / VS Code);
+    /// otherwise it is session-local. Reverts on failure.
+    fn toggle_viewed(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        let Some(file) = self.files.get(file_ix) else {
+            return;
+        };
+        let path = file.path.clone();
+        let now_viewed = !self.viewed.contains(&path);
+        if now_viewed {
+            self.viewed.insert(path.clone());
+        } else {
+            self.viewed.remove(&path);
+        }
+        cx.notify();
+        let (Some(node), Some((_, _, account))) =
+            (self.branch_pr_node.clone(), self.branch_pr.clone())
+        else {
+            return; // No PR backing this branch; keep the local toggle only.
+        };
+        let client = match account {
+            Some(a) => GithubClient::gh_cli_as(a),
+            None => GithubClient::gh_cli(),
+        };
+        let req_path = path.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { client.set_file_viewed(&node, &req_path, now_viewed) })
+                .await;
+            if result.is_err() {
+                view.update(cx, |this, cx| {
+                    if now_viewed {
+                        this.viewed.remove(&path);
+                    } else {
+                        this.viewed.insert(path);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.collapsed_folders.remove(&path) {
+            self.collapsed_folders.insert(path);
+        }
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn toggle_tree_mode(&mut self, cx: &mut Context<Self>) {
+        self.tree_mode = !self.tree_mode;
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.wrap = !self.wrap;
+        self.list_state.reset(self.active_len());
+        cx.notify();
+    }
+
+    fn sidebar_callbacks(&self, entity: &Entity<Self>) -> SidebarCallbacks {
+        let e1 = entity.clone();
+        let on_select: diff_pane::SelectFileFn = Rc::new(move |ix, _w, cx| {
+            e1.update(cx, |this, cx| this.select_file(ix, cx));
+        });
+        let e2 = entity.clone();
+        let on_toggle_viewed: diff_pane::ToggleViewedFn = Rc::new(move |ix, _w, cx| {
+            e2.update(cx, |this, cx| this.toggle_viewed(ix, cx));
+        });
+        let e3 = entity.clone();
+        let on_toggle_folder: diff_pane::ToggleFolderFn = Rc::new(move |path, _w, cx| {
+            e3.update(cx, |this, cx| this.toggle_folder(path, cx));
+        });
+        SidebarCallbacks { on_select, on_toggle_viewed, on_toggle_folder }
+    }
+
+    fn render_sidebar_item(
+        &self,
+        ix: usize,
+        cb: &SidebarCallbacks,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let Some(row) = self.sidebar_rows.get(ix) else {
+            return div().into_any_element();
+        };
+        let pane = self.pane();
+        match row {
+            SidebarRow::Folder { depth, name, path, file_count, collapsed } => pane
+                .render_folder_row(
+                    ix,
+                    *depth,
+                    name,
+                    path.clone(),
+                    *file_count,
+                    *collapsed,
+                    &cb.on_toggle_folder,
+                    cx,
+                ),
+            SidebarRow::File { depth, file_ix } => {
+                let (adds, dels) = self.stats.get(*file_ix).copied().unwrap_or((0, 0));
+                let viewed =
+                    self.files.get(*file_ix).map(|f| self.viewed.contains(&f.path)).unwrap_or(false);
+                pane.render_file_row(
+                    *file_ix,
+                    ix,
+                    *depth,
+                    adds,
+                    dels,
+                    self.selected_file == Some(*file_ix),
+                    viewed,
+                    None,
+                    cb,
+                    cx,
+                )
+            }
+        }
+    }
+
+    fn render_sidebar_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let reviewed = self.files.iter().filter(|f| self.viewed.contains(&f.path)).count();
+        let total = self.files.len();
+        let tree_mode = self.tree_mode;
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(format!("{reviewed}/{total} reviewed"))),
+            )
+            .child(
+                Button::new("local-sidebar-tree")
+                    .label(if tree_mode { "Tree" } else { "Flat" })
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_tree_mode(cx))),
+            )
     }
 
     fn active_len(&self) -> usize {
@@ -303,6 +483,7 @@ impl LocalSessionView {
             files: &self.files,
             zed_target: Some((self.clone.clone(), true)),
             add_comment: None,
+            wrap: self.wrap,
         }
     }
 
@@ -335,18 +516,6 @@ impl LocalSessionView {
             }
             _ => div().into_any_element(),
         }
-    }
-
-    fn render_sidebar_row(&self, file_ix: usize, cx: &App) -> gpui::AnyElement {
-        let (adds, dels) = self.stats.get(file_ix).copied().unwrap_or((0, 0));
-        self.pane().render_sidebar_row(
-            file_ix,
-            adds,
-            dels,
-            self.selected_file == Some(file_ix),
-            None,
-            cx,
-        )
     }
 
     fn render_create_form(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -496,6 +665,14 @@ impl LocalSessionView {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_view_mode(cx))),
             )
             .child(
+                Button::new("local-wrap")
+                    .label("Wrap")
+                    .xsmall()
+                    .when(self.wrap, |b| b.primary())
+                    .when(!self.wrap, |b| b.ghost())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
+            )
+            .child(
                 Button::new("local-refresh")
                     .label("Refresh")
                     .ghost()
@@ -569,7 +746,22 @@ fn fetch_local(clone: &std::path::Path, mode: LocalMode, base: &str) -> Result<L
         repo_local::branch_pr(clone, token.as_deref())
             .map(|(pr_repo, number)| (pr_repo, number, account))
     });
-    Ok(LoadedLocal { branch, files, stats, branch_pr })
+    // When the branch has a PR, pull the PR's node id + per-file viewed state so
+    // the "reviewed" checkboxes match github.com and the VS Code extension.
+    let mut pr_node = None;
+    let mut viewed = HashSet::new();
+    if let Some((pr_repo, number, account)) = &branch_pr {
+        let client = match account {
+            Some(a) => GithubClient::gh_cli_as(a.clone()),
+            None => GithubClient::gh_cli(),
+        };
+        let pr_number = github_types::PrNumber(*number);
+        if let Ok(files) = client.pr_viewed_files(pr_repo, pr_number) {
+            viewed = files.into_iter().filter(|(_, v)| *v).map(|(p, _)| p).collect();
+        }
+        pr_node = client.pr_review_state(pr_repo, pr_number).ok().map(|s| s.node_id);
+    }
+    Ok(LoadedLocal { branch, files, stats, branch_pr, pr_node, viewed })
 }
 
 fn file_stats(f: &FileDiff) -> (u64, u64) {
@@ -607,7 +799,8 @@ impl Render for LocalSessionView {
                 let entity = cx.entity();
                 let sidebar_entity = entity.clone();
                 let row_entity = entity.clone();
-                let file_count = self.files.len();
+                let sidebar_len = self.sidebar_rows.len();
+                let callbacks = self.sidebar_callbacks(&entity);
                 div()
                     .flex()
                     .flex_1()
@@ -616,31 +809,20 @@ impl Render for LocalSessionView {
                         div()
                             .w(px(280.))
                             .flex_shrink_0()
+                            .flex()
+                            .flex_col()
                             .border_r_1()
                             .border_color(cx.theme().border)
+                            .child(self.render_sidebar_header(cx))
                             .child(
-                                uniform_list("local-sidebar", file_count, move |range, _w, cx| {
+                                uniform_list("local-sidebar", sidebar_len, move |range, _w, cx| {
                                     let this = sidebar_entity.read(cx);
                                     range
-                                        .map(|ix| {
-                                            let row = this.render_sidebar_row(ix, cx);
-                                            div()
-                                                .id(("local-file", ix))
-                                                .on_click({
-                                                    let entity = sidebar_entity.clone();
-                                                    move |_, _, cx| {
-                                                        entity.update(cx, |this, cx| {
-                                                            this.select_file(ix, cx)
-                                                        });
-                                                    }
-                                                })
-                                                .child(row)
-                                                .into_any_element()
-                                        })
+                                        .map(|ix| this.render_sidebar_item(ix, &callbacks, cx))
                                         .collect()
                                 })
                                 .track_scroll(self.sidebar_scroll.clone())
-                                .h_full(),
+                                .flex_1(),
                             ),
                     )
                     .child(

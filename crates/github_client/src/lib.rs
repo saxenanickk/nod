@@ -104,6 +104,9 @@ const CREATE_PENDING_REVIEW: &str = include_str!("queries/create_pending_review.
 const ADD_REVIEW_THREAD: &str = include_str!("queries/add_review_thread.graphql");
 const SUBMIT_REVIEW: &str = include_str!("queries/submit_review.graphql");
 const DELETE_PENDING_REVIEW: &str = include_str!("queries/delete_pending_review.graphql");
+const PR_VIEWED_FILES: &str = include_str!("queries/pr_viewed_files.graphql");
+const MARK_FILE_VIEWED: &str = include_str!("queries/mark_file_viewed.graphql");
+const UNMARK_FILE_VIEWED: &str = include_str!("queries/unmark_file_viewed.graphql");
 const VIEWER: &str = "query { viewer { login avatarUrl } }";
 
 fn verdict_str(verdict: ReviewVerdict) -> &'static str {
@@ -288,6 +291,67 @@ impl GithubClient {
                 SearchNode::Other(_) => None,
             })
             .collect())
+    }
+
+    /// The viewer's per-file "viewed" state for the PR (the checkbox GitHub's
+    /// web UI and the VS Code extension both read/write). Returns `(path,
+    /// viewed)` for every changed file, following files pagination.
+    pub fn pr_viewed_files(
+        &self,
+        repo: &RepoId,
+        number: PrNumber,
+    ) -> Result<Vec<(String, bool)>, TransportError> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut vars = json!({ "owner": repo.owner, "name": repo.name, "number": number.0 });
+            if let Some(c) = &cursor {
+                vars["cursor"] = json!(c);
+            }
+            let data = self.transport.graphql(PR_VIEWED_FILES, &vars)?;
+            let Some(files) = data.pointer("/repository/pullRequest/files") else {
+                break;
+            };
+            if let Some(nodes) = files.get("nodes").and_then(|n| n.as_array()) {
+                for node in nodes {
+                    if let Some(path) = node.get("path").and_then(|p| p.as_str()) {
+                        let viewed = node.get("viewerViewedState").and_then(|v| v.as_str())
+                            == Some("VIEWED");
+                        out.push((path.to_string(), viewed));
+                    }
+                }
+            }
+            let page = files.get("pageInfo");
+            let has_next = page
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if !has_next {
+                break;
+            }
+            cursor = page
+                .and_then(|p| p.get("endCursor"))
+                .and_then(|c| c.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Marks (or unmarks) a PR file as viewed for the authenticated user.
+    /// This is the server-side state VS Code and github.com share.
+    pub fn set_file_viewed(
+        &self,
+        pr_node_id: &NodeId,
+        path: &str,
+        viewed: bool,
+    ) -> Result<(), TransportError> {
+        let query = if viewed { MARK_FILE_VIEWED } else { UNMARK_FILE_VIEWED };
+        self.transport
+            .graphql(query, &json!({ "prId": pr_node_id.0, "path": path }))?;
+        Ok(())
     }
 
     // ---- writes (all immediate, i.e. not batched into a pending review) ----

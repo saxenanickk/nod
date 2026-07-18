@@ -30,6 +30,20 @@ pub enum ViewMode {
 
 /// Invoked when the `+` affordance is clicked to start a comment on a line.
 pub type AddCommentFn = Rc<dyn Fn(CommentAnchor, &mut Window, &mut App)>;
+/// Sidebar callback: select a file by its index.
+pub type SelectFileFn = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// Sidebar callback: toggle a file's "viewed" checkbox by its index.
+pub type ToggleViewedFn = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// Sidebar callback: collapse/expand a folder by its full path.
+pub type ToggleFolderFn = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+/// Click handlers the sidebar rows need, supplied by the session view.
+#[derive(Clone)]
+pub struct SidebarCallbacks {
+    pub on_select: SelectFileFn,
+    pub on_toggle_viewed: ToggleViewedFn,
+    pub on_toggle_folder: ToggleFolderFn,
+}
 
 /// The borrowed state the shared renderers need, plus optional PR-only hooks.
 pub struct PaneData<'a> {
@@ -38,6 +52,8 @@ pub struct PaneData<'a> {
     pub zed_target: Option<(PathBuf, bool)>,
     /// `None` disables the `+`-to-comment affordance (read-only local mode).
     pub add_comment: Option<AddCommentFn>,
+    /// Soft-wrap long code lines instead of clipping them.
+    pub wrap: bool,
 }
 
 impl PaneData<'_> {
@@ -152,12 +168,17 @@ impl PaneData<'_> {
         let mut el = div()
             .id(("line", row_ix))
             .group(group_name.clone())
-            .h(px(ROW_HEIGHT))
             .w_full()
             .flex()
-            .items_center()
             .font_family(MONO)
             .text_sm();
+        // Wrapping rows grow with their content and top-align; fixed rows keep
+        // the compact single-line look.
+        el = if self.wrap {
+            el.items_start().py(px(2.))
+        } else {
+            el.h(px(ROW_HEIGHT)).items_center()
+        };
         if let Some(bg) = bg {
             el = el.bg(bg);
         }
@@ -182,7 +203,7 @@ impl PaneData<'_> {
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(marker)),
             )
-            .child(code_cell(line.text(), lang, cx))
+            .child(code_cell(line.text(), lang, self.wrap, cx))
             .into_any_element()
     }
 
@@ -197,9 +218,19 @@ impl PaneData<'_> {
     ) -> gpui::AnyElement {
         let lang = self.lang_for(file_ix);
         let path = self.files.get(file_ix).map(|f| f.path.clone());
-        let mut container = div().w_full().flex().items_center();
+        let mut container = div().w_full().flex();
+        // When wrapping, halves may differ in height; the default flex
+        // align-items (stretch) makes both columns and the divider match the
+        // taller one. Only pin center alignment in the fixed-height mode.
+        if !self.wrap {
+            container = container.items_center();
+        }
         if in_comment_range {
             container = container.border_l_2().border_color(rgb(0xe5c07b));
+        }
+        let mut divider = div().w(px(1.)).flex_shrink_0().bg(cx.theme().border);
+        if !self.wrap {
+            divider = divider.h(px(ROW_HEIGHT));
         }
         // Comment + Zed anchor only on the right (head) column.
         let right_anchor = path.clone().map(|p| CommentAnchor {
@@ -212,13 +243,7 @@ impl PaneData<'_> {
         let right_zed = self.zed_for(file_ix, right.map(|h| h.line_no));
         container
             .child(self.render_half(left, lang, ("half-l", row_ix), None, None, cx))
-            .child(
-                div()
-                    .w(px(1.))
-                    .h(px(ROW_HEIGHT))
-                    .bg(cx.theme().border)
-                    .flex_shrink_0(),
-            )
+            .child(divider)
             .child(self.render_half(right, lang, ("half-r", row_ix), right_anchor, right_zed, cx))
             .into_any_element()
     }
@@ -234,12 +259,13 @@ impl PaneData<'_> {
         cx: &App,
     ) -> gpui::AnyElement {
         let Some(half) = half else {
-            return div()
+            let mut blank = div()
                 .w_1_2()
-                .h(px(ROW_HEIGHT))
                 .flex_shrink_0()
-                .bg(cx.theme().secondary.opacity(0.25))
-                .into_any_element();
+                .bg(cx.theme().secondary.opacity(0.25));
+            // Stretch to the pair's height when wrapping; fixed otherwise.
+            blank = if self.wrap { blank.min_h(px(ROW_HEIGHT)) } else { blank.h(px(ROW_HEIGHT)) };
+            return blank.into_any_element();
         };
         let bg = match half.kind {
             HalfKind::Added => Some(gpui::Hsla::from(rgb(0x98c379)).opacity(0.13)),
@@ -251,11 +277,14 @@ impl PaneData<'_> {
             .id(id)
             .group(group_name.clone())
             .w_1_2()
-            .h(px(ROW_HEIGHT))
             .flex()
-            .items_center()
             .font_family(MONO)
             .text_sm();
+        cell = if self.wrap {
+            cell.items_start().py(px(2.))
+        } else {
+            cell.h(px(ROW_HEIGHT)).items_center()
+        };
         if let Some(bg) = bg {
             cell = cell.bg(bg);
         }
@@ -276,7 +305,7 @@ impl PaneData<'_> {
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(half.line_no.to_string())),
             )
-            .child(code_cell(&half.text, lang, cx))
+            .child(code_cell(&half.text, lang, self.wrap, cx))
             .into_any_element()
     }
 
@@ -307,15 +336,24 @@ impl PaneData<'_> {
         cell
     }
 
-    /// A file row for the changed-files sidebar. `badge` is an optional
-    /// unresolved-comment count (PR mode).
-    pub fn render_sidebar_row(
+    /// A file row for the changed-files sidebar. `key` is the sidebar row index
+    /// (for stable element ids); `depth` indents the row under its folder;
+    /// `viewed` draws the reviewed checkbox as checked; `badge` is an optional
+    /// unresolved-comment count (PR mode). The row has two independent click
+    /// zones — the checkbox toggles viewed, the rest selects the file — so the
+    /// two never fight over the same click.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_file_row(
         &self,
         file_ix: usize,
+        key: usize,
+        depth: usize,
         adds: u64,
         dels: u64,
         selected: bool,
+        viewed: bool,
         badge: Option<usize>,
+        cb: &SidebarCallbacks,
         cx: &App,
     ) -> gpui::AnyElement {
         let Some(file) = self.files.get(file_ix) else {
@@ -332,36 +370,139 @@ impl PaneData<'_> {
             FileStatus::Removed => "D",
             FileStatus::Renamed => "R",
         };
+        // Nested files show just their base name; the folder rows carry the path.
+        let label: String = if depth > 0 {
+            file.path.rsplit('/').next().unwrap_or(&file.path).to_string()
+        } else {
+            file.path.clone()
+        };
+        let name_color = if viewed { cx.theme().muted_foreground } else { cx.theme().foreground };
+
+        let checkbox = {
+            let on_toggle = cb.on_toggle_viewed.clone();
+            let mut check = div()
+                .id(("viewed", key))
+                .flex_shrink_0()
+                .w(px(15.))
+                .h(px(15.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(if viewed {
+                    gpui::Hsla::from(rgb(0x98c379))
+                } else {
+                    cx.theme().border
+                })
+                .cursor_pointer()
+                .on_click(move |_, window, cx| on_toggle(file_ix, window, cx));
+            if viewed {
+                check = check
+                    .bg(gpui::Hsla::from(rgb(0x98c379)).opacity(0.2))
+                    .child(div().text_xs().text_color(rgb(0x98c379)).child("✓"));
+            }
+            check
+        };
+
+        let select = {
+            let on_select = cb.on_select.clone();
+            div()
+                .id(("file-sel", key))
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .child(div().text_color(status_color).font_family(MONO).child(SharedString::from(marker)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(name_color)
+                        .child(SharedString::from(label)),
+                )
+                .when_some(badge.filter(|c| *c > 0), |el, count| {
+                    el.child(
+                        div()
+                            .text_color(rgb(0xe5c07b))
+                            .whitespace_nowrap()
+                            .child(SharedString::from(format!("💬{count}"))),
+                    )
+                })
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_nowrap()
+                        .child(SharedString::from(format!("+{adds} −{dels}"))),
+                )
+                .on_click(move |_, window, cx| on_select(file_ix, window, cx))
+        };
+
         div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .h(px(ROW_HEIGHT + 4.))
-            .px_2()
+            .pl(px(8. + depth as f32 * 12.))
+            .pr_2()
             .text_sm()
-            .cursor_pointer()
             .when(selected, |el| el.bg(cx.theme().accent))
             .hover(|el| el.bg(cx.theme().accent))
+            .child(checkbox)
+            .child(select)
+            .into_any_element()
+    }
+
+    /// A collapsible folder header for the tree sidebar. Clicking anywhere on
+    /// the row toggles the folder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_folder_row(
+        &self,
+        key: usize,
+        depth: usize,
+        name: &str,
+        path: String,
+        file_count: usize,
+        collapsed: bool,
+        on_toggle: &ToggleFolderFn,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let on_toggle = on_toggle.clone();
+        div()
+            .id(("folder", key))
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(ROW_HEIGHT + 4.))
+            .pl(px(8. + depth as f32 * 12.))
+            .pr_2()
+            .text_sm()
+            .cursor_pointer()
+            .hover(|el| el.bg(cx.theme().accent))
+            .on_click(move |_, window, cx| on_toggle(path.clone(), window, cx))
             .child(
                 div()
-                    .text_color(status_color)
-                    .font_family(MONO)
-                    .child(SharedString::from(marker)),
+                    .w(px(12.))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if collapsed { "▸" } else { "▾" }),
             )
-            .child(div().flex_1().min_w_0().truncate().child(SharedString::from(file.path.clone())))
-            .when_some(badge.filter(|c| *c > 0), |el, count| {
-                el.child(
-                    div()
-                        .text_color(rgb(0xe5c07b))
-                        .whitespace_nowrap()
-                        .child(SharedString::from(format!("💬{count}"))),
-                )
-            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(SharedString::from(name.to_string())),
+            )
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
                     .whitespace_nowrap()
-                    .child(SharedString::from(format!("+{adds} −{dels}"))),
+                    .child(SharedString::from(file_count.to_string())),
             )
             .into_any_element()
     }
@@ -438,9 +579,12 @@ fn highlight_style(kind: syntax::Highlight) -> gpui::HighlightStyle {
 }
 
 /// Builds the code cell for a line, syntax-highlighted when a language is known.
-pub fn code_cell(text: &str, lang: Option<syntax::Lang>, _cx: &App) -> gpui::AnyElement {
+/// When `wrap` is false the cell clips overflow to one line; when true it lets
+/// long lines wrap so nothing is hidden.
+pub fn code_cell(text: &str, lang: Option<syntax::Lang>, wrap: bool, _cx: &App) -> gpui::AnyElement {
     let spans = lang.map(|l| syntax::highlight_line(l, text)).unwrap_or_default();
-    let cell = div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap();
+    let cell = div().flex_1().min_w_0();
+    let cell = if wrap { cell } else { cell.overflow_hidden().whitespace_nowrap() };
     if spans.is_empty() {
         return cell.child(SharedString::from(text.to_string())).into_any_element();
     }

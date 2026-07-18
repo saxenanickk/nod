@@ -1,0 +1,5 @@
+mutation($prId: ID!, $path: String!) {
+  unmarkFileAsViewed(input: { pullRequestId: $prId, path: $path }) {
+    clientMutationId
+  }
+}
