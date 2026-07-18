@@ -24,6 +24,20 @@ app you keep next to Zed —
 Built in GPUI (the same Rust UI framework Zed uses) with UI-free domain
 crates, so the core could one day move into Zed itself.
 
+## Download
+
+Grab the latest `.app` from [**Releases**](https://github.com/saxenanickk/nod/releases/latest)
+(macOS on Apple Silicon). Unzip, move **Nod.app** to `/Applications`.
+
+This build isn't notarized yet, so on first launch macOS will say it "can't be
+opened" — **right-click → Open** and confirm, or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/nod.app
+```
+
+Or build it yourself — see [Development](#development).
+
 ## Two ways in
 
 The top nav switches between:
