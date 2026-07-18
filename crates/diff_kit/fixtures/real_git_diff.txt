@@ -1,0 +1,1664 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 0b43c6f..44f6251 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4244,6 +4244,7 @@ dependencies = [
+  "review_store",
+  "serde",
+  "serde_json",
++ "syntax",
+  "zed_bridge",
+ ]
+ 
+@@ -5786,6 +5787,20 @@ dependencies = [
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "syntax"
++version = "0.1.0"
++dependencies = [
++ "tree-sitter",
++ "tree-sitter-go",
++ "tree-sitter-highlight",
++ "tree-sitter-javascript",
++ "tree-sitter-json",
++ "tree-sitter-python",
++ "tree-sitter-rust",
++ "tree-sitter-typescript",
++]
++
+ [[package]]
+ name = "sys-locale"
+ version = "0.3.2"
+@@ -6220,6 +6235,38 @@ dependencies = [
+  "tree-sitter-language",
+ ]
+ 
++[[package]]
++name = "tree-sitter-go"
++version = "0.25.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-highlight"
++version = "0.25.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "adc5f880ad8d8f94e88cb81c3557024cf1a8b75e3b504c50481ed4f5a6006ff3"
++dependencies = [
++ "regex",
++ "streaming-iterator",
++ "thiserror 2.0.18",
++ "tree-sitter",
++]
++
++[[package]]
++name = "tree-sitter-javascript"
++version = "0.25.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
+ [[package]]
+ name = "tree-sitter-json"
+ version = "0.24.8"
+@@ -6236,6 +6283,36 @@ version = "0.1.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+ 
++[[package]]
++name = "tree-sitter-python"
++version = "0.25.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-rust"
++version = "0.24.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-typescript"
++version = "0.23.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
+ [[package]]
+ name = "triomphe"
+ version = "0.1.16"
+diff --git a/Cargo.toml b/Cargo.toml
+index 95bf750..c5b32b7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,6 +7,7 @@ members = [
+     "crates/repo_local",
+     "crates/review_store",
+     "crates/zed_bridge",
++    "crates/syntax",
+     "crates/prdesk",
+ ]
+ 
+diff --git a/README.md b/README.md
+index 2505e34..850391c 100644
+--- a/README.md
++++ b/README.md
+@@ -40,6 +40,21 @@ crates, so the core could one day move into Zed itself.
+ - `scope` — extra search qualifier for the PR list (`org:…` / `repo:…`);
+   empty searches all of GitHub.
+ 
++## Keyboard shortcuts
++
++In an open PR:
++
++| Key | Action |
++|-----|--------|
++| `]` / `[` | Next / previous file |
++| `n` / `p` | Next / previous comment thread |
++| `r` | Refresh |
++| `esc` | Close the composer/review drawer, else go back |
++| `cmd-q` | Quit |
++
++Use the **Split** / **Unified** button in the PR header to switch between a
++side-by-side and an inline diff.
++
+ ## Development
+ 
+ ```sh
+@@ -50,3 +65,10 @@ cargo test         # domain-crate tests
+ Workspace rule: only the `prdesk` crate may depend on gpui/gpui-component
+ (`cargo tree -i gpui` must show a single crate). Everything below it —
+ `github_types`, `github_client`, `diff_kit`, `review_store` — stays UI-free.
++
++### Packaging a macOS `.app`
++
++```sh
++cargo install cargo-bundle
++cargo bundle --release --package prdesk
++```
+diff --git a/crates/diff_kit/src/layout.rs b/crates/diff_kit/src/layout.rs
+index 31b0371..f31fcc0 100644
+--- a/crates/diff_kit/src/layout.rs
++++ b/crates/diff_kit/src/layout.rs
+@@ -4,6 +4,7 @@
+ use crate::{DiffLine, FileDiff};
+ use github_types::{DiffSide, NodeId, ReviewThread};
+ use std::collections::HashMap;
++use std::sync::Arc;
+ 
+ #[derive(Debug, Clone, PartialEq)]
+ pub enum DiffRow {
+@@ -141,6 +142,177 @@ pub fn layout_unified(
+     rows
+ }
+ 
++// ---- side-by-side layout ----
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum HalfKind {
++    Context,
++    Added,
++    Removed,
++}
++
++/// One cell in a side-by-side row.
++#[derive(Debug, Clone, PartialEq)]
++pub struct HalfRow {
++    pub line_no: u32,
++    pub text: Arc<str>,
++    pub kind: HalfKind,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub enum SplitRow {
++    FileHeader { file_ix: usize },
++    HunkHeader { file_ix: usize, hunk_ix: usize },
++    /// A paired row: `left` is the base side, `right` the head side. Either
++    /// may be `None` (a pure add or delete).
++    Pair {
++        file_ix: usize,
++        left: Option<HalfRow>,
++        right: Option<HalfRow>,
++        in_comment_range: bool,
++    },
++    Thread { thread_id: NodeId },
++    OutdatedThreadsHeader { file_ix: usize, count: usize },
++    OutdatedThread { thread_id: NodeId },
++}
++
++/// Partitions a file's threads into live (keyed by anchor) and outdated, and
++/// computes the highlighted comment ranges. Shared by both layouts.
++fn partition_threads<'a>(
++    file: &FileDiff,
++    file_threads: Vec<&'a ReviewThread>,
++) -> (
++    HashMap<(DiffSide, u32), Vec<&'a ReviewThread>>,
++    Vec<&'a ReviewThread>,
++    Vec<(DiffSide, u32, u32)>,
++) {
++    let addressable: std::collections::HashSet<(DiffSide, u32)> = file
++        .hunks
++        .iter()
++        .flat_map(|h| h.lines.iter())
++        .flat_map(line_anchor)
++        .collect();
++    let mut anchored: HashMap<(DiffSide, u32), Vec<&ReviewThread>> = HashMap::new();
++    let mut outdated: Vec<&ReviewThread> = Vec::new();
++    for thread in file_threads {
++        match thread.line {
++            Some(line) if !thread.is_outdated && addressable.contains(&(thread.side, line)) => {
++                anchored.entry((thread.side, line)).or_default().push(thread);
++            }
++            _ => outdated.push(thread),
++        }
++    }
++    let ranges: Vec<(DiffSide, u32, u32)> = anchored
++        .values()
++        .flatten()
++        .filter_map(|t| {
++            Some((t.start_side.unwrap_or(t.side), t.start_line?, t.line?))
++        })
++        .collect();
++    (anchored, outdated, ranges)
++}
++
++fn in_range(side: DiffSide, line: u32, ranges: &[(DiffSide, u32, u32)]) -> bool {
++    ranges
++        .iter()
++        .any(|(rside, start, end)| *rside == side && (*start..=*end).contains(&line))
++}
++
++/// Side-by-side layout. Same thread rules as [`layout_unified`]; threads and
++/// outdated groups span the full width beneath their anchor pair.
++pub fn layout_split(
++    files: &[FileDiff],
++    threads: &[ReviewThread],
++    opts: LayoutOptions,
++) -> Vec<SplitRow> {
++    let mut rows = Vec::new();
++    let mut by_path: HashMap<&str, Vec<&ReviewThread>> = HashMap::new();
++    for thread in threads {
++        if !opts.show_resolved && thread.is_resolved {
++            continue;
++        }
++        by_path.entry(thread.path.as_str()).or_default().push(thread);
++    }
++
++    for (file_ix, file) in files.iter().enumerate() {
++        let file_threads = by_path.remove(file.path.as_str()).unwrap_or_default();
++        let (mut anchored, outdated, ranges) = partition_threads(file, file_threads);
++
++        rows.push(SplitRow::FileHeader { file_ix });
++        if opts.show_outdated && !outdated.is_empty() {
++            rows.push(SplitRow::OutdatedThreadsHeader { file_ix, count: outdated.len() });
++            for thread in &outdated {
++                rows.push(SplitRow::OutdatedThread { thread_id: thread.id.clone() });
++            }
++        }
++
++        for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
++            rows.push(SplitRow::HunkHeader { file_ix, hunk_ix });
++
++            // Build paired rows: context aligns both sides; runs of removed
++            // then added lines zip together, with leftovers on one side.
++            let mut pairs: Vec<(Option<HalfRow>, Option<HalfRow>)> = Vec::new();
++            let mut rem: Vec<HalfRow> = Vec::new();
++            let mut add: Vec<HalfRow> = Vec::new();
++            let flush = |rem: &mut Vec<HalfRow>,
++                         add: &mut Vec<HalfRow>,
++                         pairs: &mut Vec<(Option<HalfRow>, Option<HalfRow>)>| {
++                let n = rem.len().max(add.len());
++                for i in 0..n {
++                    pairs.push((rem.get(i).cloned(), add.get(i).cloned()));
++                }
++                rem.clear();
++                add.clear();
++            };
++            for line in &hunk.lines {
++                match line {
++                    DiffLine::Context { old, new, text } => {
++                        flush(&mut rem, &mut add, &mut pairs);
++                        pairs.push((
++                            Some(HalfRow { line_no: *old, text: text.clone(), kind: HalfKind::Context }),
++                            Some(HalfRow { line_no: *new, text: text.clone(), kind: HalfKind::Context }),
++                        ));
++                    }
++                    DiffLine::Removed { old, text } => {
++                        rem.push(HalfRow { line_no: *old, text: text.clone(), kind: HalfKind::Removed });
++                    }
++                    DiffLine::Added { new, text } => {
++                        add.push(HalfRow { line_no: *new, text: text.clone(), kind: HalfKind::Added });
++                    }
++                }
++            }
++            flush(&mut rem, &mut add, &mut pairs);
++
++            for (left, right) in pairs {
++                let in_comment_range = left
++                    .as_ref()
++                    .is_some_and(|h| in_range(DiffSide::Left, h.line_no, &ranges))
++                    || right
++                        .as_ref()
++                        .is_some_and(|h| in_range(DiffSide::Right, h.line_no, &ranges));
++                // Anchor keys this pair covers.
++                let mut keys = Vec::new();
++                if let Some(h) = &left {
++                    keys.push((DiffSide::Left, h.line_no));
++                }
++                if let Some(h) = &right {
++                    keys.push((DiffSide::Right, h.line_no));
++                }
++                rows.push(SplitRow::Pair { file_ix, left, right, in_comment_range });
++                for key in keys {
++                    if let Some(list) = anchored.remove(&key) {
++                        rows.extend(
++                            list.into_iter()
++                                .map(|t| SplitRow::Thread { thread_id: t.id.clone() }),
++                        );
++                    }
++                }
++            }
++        }
++    }
++    rows
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -302,4 +474,55 @@ mod tests {
+         let rows = layout_unified(&[f], &[], LayoutOptions::default());
+         assert_eq!(row_kinds(&rows), ["file"]);
+     }
++
++    #[test]
++    fn split_pairs_context_and_zips_changes() {
++        let files = [file("src/a.rs", PATCH)];
++        let rows = layout_split(&files, &[], LayoutOptions::default());
++        // Collect just the pairs.
++        let pairs: Vec<_> = rows
++            .iter()
++            .filter_map(|r| match r {
++                SplitRow::Pair { left, right, .. } => Some((left.clone(), right.clone())),
++                _ => None,
++            })
++            .collect();
++        // context one → both sides; removed two zipped with added two;
++        // added three → right only; context last → both sides.
++        assert_eq!(pairs.len(), 4);
++        // First is context on both sides.
++        assert!(matches!(&pairs[0], (Some(l), Some(r))
++            if l.kind == HalfKind::Context && r.kind == HalfKind::Context));
++        // Second: removed (left) paired with added (right).
++        assert!(matches!(&pairs[1], (Some(l), Some(r))
++            if l.kind == HalfKind::Removed && r.kind == HalfKind::Added));
++        // Third: pure add, left empty.
++        assert!(matches!(&pairs[2], (None, Some(r)) if r.kind == HalfKind::Added));
++        // Fourth: context again.
++        assert!(matches!(&pairs[3], (Some(_), Some(_))));
++    }
++
++    #[test]
++    fn split_places_thread_after_anchor_pair() {
++        let files = [file("src/a.rs", PATCH)];
++        // Anchor on Right line 3 ("added three").
++        let threads = [thread("t1", "src/a.rs", DiffSide::Right, Some(3))];
++        let rows = layout_split(&files, &threads, LayoutOptions::default());
++        let thread_pos = rows
++            .iter()
++            .position(|r| matches!(r, SplitRow::Thread { .. }))
++            .expect("thread present");
++        // The row before it is the pair whose right line is 3.
++        assert!(matches!(&rows[thread_pos - 1], SplitRow::Pair { right: Some(h), .. }
++            if h.line_no == 3));
++    }
++
++    #[test]
++    fn split_groups_outdated() {
++        let files = [file("src/a.rs", PATCH)];
++        let mut gone = thread("t1", "src/a.rs", DiffSide::Right, None);
++        gone.is_outdated = true;
++        let rows = layout_split(&files, &[gone], LayoutOptions::default());
++        assert!(matches!(rows[1], SplitRow::OutdatedThreadsHeader { count: 1, .. }));
++    }
+ }
+diff --git a/crates/diff_kit/src/lib.rs b/crates/diff_kit/src/lib.rs
+index 1dabf7f..7306379 100644
+--- a/crates/diff_kit/src/lib.rs
++++ b/crates/diff_kit/src/lib.rs
+@@ -4,7 +4,9 @@
+ mod layout;
+ mod parse;
+ 
+-pub use layout::{DiffRow, LayoutOptions, layout_unified};
++pub use layout::{
++    DiffRow, HalfKind, HalfRow, LayoutOptions, SplitRow, layout_split, layout_unified,
++};
+ pub use parse::{PatchParseError, parse_patch};
+ 
+ use std::sync::Arc;
+diff --git a/crates/prdesk/Cargo.toml b/crates/prdesk/Cargo.toml
+index c560436..efae0f0 100644
+--- a/crates/prdesk/Cargo.toml
++++ b/crates/prdesk/Cargo.toml
+@@ -15,6 +15,16 @@ diff_kit = { workspace = true }
+ repo_local = { workspace = true }
+ review_store = { workspace = true }
+ zed_bridge = { workspace = true }
++syntax = { path = "../syntax" }
+ gpui = "0.2"
+ gpui-component = "0.5"
+ gpui-component-assets = "0.5"
++
++# `cargo bundle --release` (needs `cargo install cargo-bundle`) packages a
++# macOS .app from this metadata.
++[package.metadata.bundle]
++name = "prdesk"
++identifier = "dev.saxenanickk.prdesk"
++short_description = "GitHub PR review companion for Zed"
++category = "public.app-category.developer-tools"
++osx_minimum_system_version = "11.0"
+diff --git a/crates/prdesk/src/main.rs b/crates/prdesk/src/main.rs
+index 57b636f..69c23a0 100644
+--- a/crates/prdesk/src/main.rs
++++ b/crates/prdesk/src/main.rs
+@@ -11,6 +11,10 @@ use gpui::{
+     prelude::*, px, size,
+ };
+ use gpui_component::{Root, Theme, ThemeMode, TitleBar};
++use pr_session::{
++    DismissOverlay, NextFile, NextThread, PrevFile, PrevThread, RefreshSession,
++    SESSION_KEY_CONTEXT,
++};
+ use workspace::Workspace;
+ 
+ actions!(prdesk, [Quit]);
+@@ -24,7 +28,17 @@ fn main() {
+             gpui_component::init(cx);
+             Theme::change(ThemeMode::Dark, None, cx);
+ 
+-            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
++            cx.bind_keys([
++                KeyBinding::new("cmd-q", Quit, None),
++                // Session navigation, scoped so typing in a composer isn't
++                // hijacked (the Input's own context takes precedence there).
++                KeyBinding::new("]", NextFile, Some(SESSION_KEY_CONTEXT)),
++                KeyBinding::new("[", PrevFile, Some(SESSION_KEY_CONTEXT)),
++                KeyBinding::new("n", NextThread, Some(SESSION_KEY_CONTEXT)),
++                KeyBinding::new("p", PrevThread, Some(SESSION_KEY_CONTEXT)),
++                KeyBinding::new("r", RefreshSession, Some(SESSION_KEY_CONTEXT)),
++                KeyBinding::new("escape", DismissOverlay, Some(SESSION_KEY_CONTEXT)),
++            ]);
+             cx.on_action(|_: &Quit, cx| cx.quit());
+             cx.on_window_closed(|cx| {
+                 if cx.windows().is_empty() {
+diff --git a/crates/prdesk/src/pr_session.rs b/crates/prdesk/src/pr_session.rs
+index 8e9f7ae..5c23ea4 100644
+--- a/crates/prdesk/src/pr_session.rs
++++ b/crates/prdesk/src/pr_session.rs
+@@ -3,7 +3,10 @@
+ 
+ use crate::config::{self, Config};
+ use crate::util::relative_time;
+-use diff_kit::{DiffLine, DiffRow, FileDiff, FileStatus, LayoutOptions, layout_unified};
++use diff_kit::{
++    DiffLine, DiffRow, FileDiff, FileStatus, HalfKind, HalfRow, LayoutOptions, SplitRow,
++    layout_split, layout_unified,
++};
+ use github_client::GithubClient;
+ use github_types::{
+     CommentAnchor, DiffSide, MergeMethod, MergeableState, NodeId, PrReviewState, PrSummary,
+@@ -32,6 +35,20 @@ pub enum SessionEvent {
+     Close,
+ }
+ 
++gpui::actions!(
++    pr_session,
++    [NextFile, PrevFile, NextThread, PrevThread, RefreshSession, DismissOverlay]
++);
++
++/// The key context the session's bindings are scoped to (see main.rs).
++pub const SESSION_KEY_CONTEXT: &str = "PrSession";
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum ViewMode {
++    Unified,
++    Split,
++}
++
+ enum SessionLoad {
+     Loading,
+     Failed(String),
+@@ -102,7 +119,9 @@ pub struct PrSessionView {
+     /// thread node id → index into `threads`.
+     thread_ix: HashMap<String, usize>,
+     rows: Vec<DiffRow>,
+-    /// file_ix → index of its `FileHeader` row.
++    split_rows: Vec<SplitRow>,
++    view_mode: ViewMode,
++    /// file_ix → index of its `FileHeader` row (for the active view mode).
+     header_rows: Vec<usize>,
+     show_resolved: bool,
+     /// Resolved threads the user expanded back open.
+@@ -120,6 +139,8 @@ pub struct PrSessionView {
+     review_state: Option<PrReviewState>,
+     review_drawer: Option<ReviewDrawer>,
+     merging: bool,
++    /// Cursor into thread rows for n/p navigation.
++    thread_nav: usize,
+     generation: u64,
+     pub focus_handle: FocusHandle,
+ }
+@@ -142,6 +163,8 @@ impl PrSessionView {
+             threads: Vec::new(),
+             thread_ix: HashMap::new(),
+             rows: Vec::new(),
++            split_rows: Vec::new(),
++            view_mode: ViewMode::Unified,
+             header_rows: Vec::new(),
+             show_resolved: true,
+             expanded: HashSet::new(),
+@@ -154,6 +177,7 @@ impl PrSessionView {
+             review_state: None,
+             review_drawer: None,
+             merging: false,
++            thread_nav: 0,
+             generation: 0,
+             focus_handle: cx.focus_handle(),
+         };
+@@ -285,27 +309,44 @@ impl PrSessionView {
+         cx.notify();
+     }
+ 
+-    /// Recomputes the row list from stored files/threads and current options.
++    /// Recomputes both row lists from stored files/threads and current
++    /// options, then refreshes the list length for the active view.
+     fn relayout(&mut self) {
+         let opts = LayoutOptions {
+             show_resolved: self.show_resolved,
+             show_outdated: true,
+         };
+         self.rows = layout_unified(&self.files, &self.threads, opts);
++        self.split_rows = layout_split(&self.files, &self.threads, opts);
++        self.recompute_header_rows();
++        self.list_state.reset(self.active_len());
++    }
++
++    fn active_len(&self) -> usize {
++        match self.view_mode {
++            ViewMode::Unified => self.rows.len(),
++            ViewMode::Split => self.split_rows.len(),
++        }
++    }
++
++    fn recompute_header_rows(&mut self) {
+         self.header_rows = self
+             .files
+             .iter()
+             .enumerate()
+-            .map(|(file_ix, _)| {
+-                self.rows
++            .map(|(file_ix, _)| match self.view_mode {
++                ViewMode::Unified => self
++                    .rows
+                     .iter()
+-                    .position(
+-                        |r| matches!(r, DiffRow::FileHeader { file_ix: fx } if *fx == file_ix),
+-                    )
+-                    .unwrap_or(0)
++                    .position(|r| matches!(r, DiffRow::FileHeader { file_ix: fx } if *fx == file_ix))
++                    .unwrap_or(0),
++                ViewMode::Split => self
++                    .split_rows
++                    .iter()
++                    .position(|r| matches!(r, SplitRow::FileHeader { file_ix: fx } if *fx == file_ix))
++                    .unwrap_or(0),
+             })
+             .collect();
+-        self.list_state.reset(self.rows.len());
+     }
+ 
+     fn toggle_resolved(&mut self, cx: &mut Context<Self>) {
+@@ -314,6 +355,16 @@ impl PrSessionView {
+         cx.notify();
+     }
+ 
++    fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
++        self.view_mode = match self.view_mode {
++            ViewMode::Unified => ViewMode::Split,
++            ViewMode::Split => ViewMode::Unified,
++        };
++        self.recompute_header_rows();
++        self.list_state.reset(self.active_len());
++        cx.notify();
++    }
++
+     fn select_file(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+         self.selected_file = Some(file_ix);
+         if let Some(&row_ix) = self.header_rows.get(file_ix) {
+@@ -329,6 +380,66 @@ impl PrSessionView {
+         self.thread_ix.get(&id.0).and_then(|&ix| self.threads.get(ix))
+     }
+ 
++    // ---- keyboard navigation ----
++
++    fn scroll_to_row(&mut self, row_ix: usize) {
++        self.list_state.scroll_to(ListOffset {
++            item_ix: row_ix,
++            offset_in_item: px(0.),
++        });
++    }
++
++    fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
++        if self.files.is_empty() {
++            return;
++        }
++        let current = self.selected_file.unwrap_or(0) as isize;
++        let next = (current + delta).rem_euclid(self.files.len() as isize) as usize;
++        self.select_file(next, cx);
++    }
++
++    fn step_thread(&mut self, delta: isize, cx: &mut Context<Self>) {
++        let thread_rows: Vec<usize> = match self.view_mode {
++            ViewMode::Unified => self
++                .rows
++                .iter()
++                .enumerate()
++                .filter(|(_, r)| {
++                    matches!(r, DiffRow::Thread { .. } | DiffRow::OutdatedThread { .. })
++                })
++                .map(|(ix, _)| ix)
++                .collect(),
++            ViewMode::Split => self
++                .split_rows
++                .iter()
++                .enumerate()
++                .filter(|(_, r)| {
++                    matches!(r, SplitRow::Thread { .. } | SplitRow::OutdatedThread { .. })
++                })
++                .map(|(ix, _)| ix)
++                .collect(),
++        };
++        if thread_rows.is_empty() {
++            return;
++        }
++        let cursor = (self.thread_nav as isize + delta).rem_euclid(thread_rows.len() as isize)
++            as usize;
++        self.thread_nav = cursor;
++        self.scroll_to_row(thread_rows[cursor]);
++        cx.notify();
++    }
++
++    /// Closes whichever bottom overlay is open (composer or review drawer);
++    /// returns whether anything was dismissed.
++    fn dismiss_overlay(&mut self, cx: &mut Context<Self>) -> bool {
++        if self.review_drawer.take().is_some() || self.composer.take().is_some() {
++            cx.notify();
++            true
++        } else {
++            false
++        }
++    }
++
+     // ---- writes: resolve/unresolve and the comment composer ----
+ 
+     /// Optimistically flips a thread's resolved flag, then reconciles with the
+@@ -840,6 +951,16 @@ impl PrSessionView {
+                         ))),
+                 )
+             })
++            .child(
++                Button::new("toggle-view")
++                    .label(match self.view_mode {
++                        ViewMode::Unified => "Split",
++                        ViewMode::Split => "Unified",
++                    })
++                    .ghost()
++                    .xsmall()
++                    .on_click(cx.listener(|this, _, _, cx| this.toggle_view_mode(cx))),
++            )
+             .child(
+                 Button::new("toggle-resolved")
+                     .label(if self.show_resolved {
+@@ -1075,6 +1196,67 @@ impl PrSessionView {
+             .into_any_element()
+     }
+ 
++    fn render_file_header(&self, file_ix: usize, ix: usize, cx: &App) -> gpui::AnyElement {
++        let Some(file) = self.files.get(file_ix) else {
++            return div().into_any_element();
++        };
++        let label = match (&file.old_path, file.is_binary_or_too_large) {
++            (Some(old), _) => format!("{} → {}", old, file.path),
++            (None, true) => format!("{} (no preview: binary or too large)", file.path),
++            (None, false) => file.path.clone(),
++        };
++        let mut header = div()
++            .h(px(ROW_HEIGHT))
++            .w_full()
++            .flex()
++            .items_center()
++            .bg(cx.theme().secondary)
++            .px_3()
++            .gap_2()
++            .font_weight(gpui::FontWeight::BOLD)
++            .child(
++                div()
++                    .flex_1()
++                    .min_w_0()
++                    .truncate()
++                    .child(SharedString::from(label)),
++            );
++        if let Some((clone_path, _)) = self.zed_target() {
++            let file_path = clone_path.join(&file.path);
++            header = header.child(
++                Button::new(("open-zed", ix))
++                    .label("Open in Zed")
++                    .ghost()
++                    .xsmall()
++                    .on_click(move |_, _, _| {
++                        let _ = zed_bridge::open_in_zed(&file_path, None);
++                    }),
++            );
++        }
++        header.into_any_element()
++    }
++
++    fn render_hunk_header(&self, file_ix: usize, hunk_ix: usize, cx: &App) -> gpui::AnyElement {
++        let header = self
++            .files
++            .get(file_ix)
++            .and_then(|f| f.hunks.get(hunk_ix))
++            .map(|h| h.header.clone())
++            .unwrap_or_default();
++        div()
++            .h(px(ROW_HEIGHT))
++            .w_full()
++            .flex()
++            .items_center()
++            .px_3()
++            .font_family(MONO)
++            .text_sm()
++            .text_color(rgb(0x6a9fb5))
++            .bg(cx.theme().secondary.opacity(0.5))
++            .child(SharedString::from(header))
++            .into_any_element()
++    }
++
+     fn render_diff_row(
+         &self,
+         ix: usize,
+@@ -1084,57 +1266,10 @@ impl PrSessionView {
+         let Some(row) = self.rows.get(ix) else {
+             return div().into_any_element();
+         };
+-        let base = div().h(px(ROW_HEIGHT)).w_full().flex().items_center();
+         match row {
+-            DiffRow::FileHeader { file_ix } => {
+-                let Some(file) = self.files.get(*file_ix) else {
+-                    return div().into_any_element();
+-                };
+-                let label = match (&file.old_path, file.is_binary_or_too_large) {
+-                    (Some(old), _) => format!("{} → {}", old, file.path),
+-                    (None, true) => format!("{} (no preview: binary or too large)", file.path),
+-                    (None, false) => file.path.clone(),
+-                };
+-                let mut header = base
+-                    .bg(cx.theme().secondary)
+-                    .px_3()
+-                    .gap_2()
+-                    .font_weight(gpui::FontWeight::BOLD)
+-                    .child(
+-                        div()
+-                            .flex_1()
+-                            .min_w_0()
+-                            .truncate()
+-                            .child(SharedString::from(label)),
+-                    );
+-                if let Some((clone_path, _)) = self.zed_target() {
+-                    let file_path = clone_path.join(&file.path);
+-                    header = header.child(
+-                        Button::new(("open-zed", ix))
+-                            .label("Open in Zed")
+-                            .ghost()
+-                            .xsmall()
+-                            .on_click(move |_, _, _| {
+-                                let _ = zed_bridge::open_in_zed(&file_path, None);
+-                            }),
+-                    );
+-                }
+-                header.into_any_element()
+-            }
++            DiffRow::FileHeader { file_ix } => self.render_file_header(*file_ix, ix, cx),
+             DiffRow::HunkHeader { file_ix, hunk_ix } => {
+-                let header = self
+-                    .files
+-                    .get(*file_ix)
+-                    .and_then(|f| f.hunks.get(*hunk_ix))
+-                    .map(|h| h.header.clone())
+-                    .unwrap_or_default();
+-                base.px_3()
+-                    .font_family(MONO)
+-                    .text_sm()
+-                    .text_color(rgb(0x6a9fb5))
+-                    .bg(cx.theme().secondary.opacity(0.5))
+-                    .child(SharedString::from(header))
+-                    .into_any_element()
++                self.render_hunk_header(*file_ix, *hunk_ix, cx)
+             }
+             DiffRow::Line { line, in_comment_range, file_ix } => {
+                 // ⌘-click opens the line in Zed once the clone sits on the
+@@ -1150,8 +1285,10 @@ impl PrSessionView {
+                     };
+                     Some((clone.join(&file.path), line_no))
+                 });
+-                let anchor = self.files.get(*file_ix).map(|file| anchor_for_line(&file.path, line));
+-                render_diff_line(line, *in_comment_range, ix, zed, anchor, entity, cx)
++                let file = self.files.get(*file_ix);
++                let anchor = file.map(|f| anchor_for_line(&f.path, line));
++                let lang = file.and_then(|f| syntax::lang_for_path(&f.path));
++                render_diff_line(line, *in_comment_range, ix, zed, anchor, lang, entity, cx)
+             }
+             DiffRow::Thread { thread_id } => {
+                 let Some(thread) = self.thread(thread_id) else {
+@@ -1159,17 +1296,7 @@ impl PrSessionView {
+                 };
+                 render_thread_card(thread, ix, false, &self.expanded, entity, cx)
+             }
+-            DiffRow::OutdatedThreadsHeader { count, .. } => div()
+-                .w_full()
+-                .px_3()
+-                .py_1()
+-                .text_sm()
+-                .text_color(rgb(0xd29922))
+-                .child(SharedString::from(format!(
+-                    "⚠ {count} outdated thread{} (code has changed since)",
+-                    if *count == 1 { "" } else { "s" }
+-                )))
+-                .into_any_element(),
++            DiffRow::OutdatedThreadsHeader { count, .. } => outdated_header_el(*count),
+             DiffRow::OutdatedThread { thread_id } => {
+                 let Some(thread) = self.thread(thread_id) else {
+                     return div().into_any_element();
+@@ -1178,6 +1305,174 @@ impl PrSessionView {
+             }
+         }
+     }
++
++    fn render_split_row(
++        &self,
++        ix: usize,
++        entity: &Entity<Self>,
++        cx: &App,
++    ) -> gpui::AnyElement {
++        let Some(row) = self.split_rows.get(ix) else {
++            return div().into_any_element();
++        };
++        match row {
++            SplitRow::FileHeader { file_ix } => self.render_file_header(*file_ix, ix, cx),
++            SplitRow::HunkHeader { file_ix, hunk_ix } => {
++                self.render_hunk_header(*file_ix, *hunk_ix, cx)
++            }
++            SplitRow::Pair { file_ix, left, right, in_comment_range } => {
++                let lang = self.files.get(*file_ix).and_then(|f| syntax::lang_for_path(&f.path));
++                let path = self.files.get(*file_ix).map(|f| f.path.clone());
++                // ⌘-click on the right (head) column jumps to Zed.
++                let zed_base = self.zed_target().filter(|(_, on_pr)| *on_pr).map(|(c, _)| c);
++                let mut container = div().w_full().flex().items_center();
++                if *in_comment_range {
++                    container = container.border_l_2().border_color(rgb(0xd29922));
++                }
++                container
++                    .child(render_half(
++                        left.as_ref(),
++                        lang,
++                        ("half-l", ix),
++                        None,
++                        None,
++                        entity,
++                        cx,
++                    ))
++                    .child(
++                        div()
++                            .w(px(1.))
++                            .h(px(ROW_HEIGHT))
++                            .bg(cx.theme().border)
++                            .flex_shrink_0(),
++                    )
++                    .child(render_half(
++                        right.as_ref(),
++                        lang,
++                        ("half-r", ix),
++                        path.clone().map(|p| CommentAnchor {
++                            path: p,
++                            side: DiffSide::Right,
++                            line: right.as_ref().map(|h| h.line_no).unwrap_or(0),
++                            start_line: None,
++                            start_side: None,
++                        }),
++                        zed_base.zip(path).map(|(clone, p)| {
++                            (clone.join(&p), right.as_ref().map(|h| h.line_no))
++                        }),
++                        entity,
++                        cx,
++                    ))
++                    .into_any_element()
++            }
++            SplitRow::Thread { thread_id } => {
++                let Some(thread) = self.thread(thread_id) else {
++                    return div().into_any_element();
++                };
++                render_thread_card(thread, ix, false, &self.expanded, entity, cx)
++            }
++            SplitRow::OutdatedThreadsHeader { count, .. } => outdated_header_el(*count),
++            SplitRow::OutdatedThread { thread_id } => {
++                let Some(thread) = self.thread(thread_id) else {
++                    return div().into_any_element();
++                };
++                render_thread_card(thread, ix, true, &self.expanded, entity, cx)
++            }
++        }
++    }
++}
++
++fn outdated_header_el(count: usize) -> gpui::AnyElement {
++    div()
++        .w_full()
++        .px_3()
++        .py_1()
++        .text_sm()
++        .text_color(rgb(0xd29922))
++        .child(SharedString::from(format!(
++            "⚠ {count} outdated thread{} (code has changed since)",
++            if count == 1 { "" } else { "s" }
++        )))
++        .into_any_element()
++}
++
++/// One column of a side-by-side pair. `anchor`/`zed` enable commenting and
++/// ⌘-click-to-Zed on that half when present.
++fn render_half(
++    half: Option<&HalfRow>,
++    lang: Option<syntax::Lang>,
++    id: (&'static str, usize),
++    anchor: Option<CommentAnchor>,
++    zed: Option<(PathBuf, Option<u32>)>,
++    entity: &Entity<PrSessionView>,
++    cx: &App,
++) -> gpui::AnyElement {
++    let Some(half) = half else {
++        // Empty half (pure add/delete on the other side).
++        return div()
++            .w_1_2()
++            .h(px(ROW_HEIGHT))
++            .flex_shrink_0()
++            .bg(cx.theme().secondary.opacity(0.25))
++            .into_any_element();
++    };
++    let bg = match half.kind {
++        HalfKind::Added => Some(gpui::Hsla::from(rgb(0x2ea043)).opacity(0.13)),
++        HalfKind::Removed => Some(gpui::Hsla::from(rgb(0xf85149)).opacity(0.13)),
++        HalfKind::Context => None,
++    };
++    let group_name = SharedString::from(format!("{}-{}", id.0, id.1));
++    let mut cell = div()
++        .id(id)
++        .group(group_name.clone())
++        .w_1_2()
++        .h(px(ROW_HEIGHT))
++        .flex()
++        .items_center()
++        .font_family(MONO)
++        .text_sm();
++    if let Some(bg) = bg {
++        cell = cell.bg(bg);
++    }
++    if let Some((path, line_no)) = zed {
++        cell = cell.on_click(move |event: &gpui::ClickEvent, _, _| {
++            if event.modifiers().platform {
++                let _ = zed_bridge::open_in_zed(&path, line_no);
++            }
++        });
++    }
++    let add = {
++        let mut c = div().w(px(16.)).flex_shrink_0().flex().justify_center();
++        if let Some(anchor) = anchor {
++            let entity = entity.clone();
++            c = c.child(
++                div()
++                    .id((id.0, id.1 + 1_000_000))
++                    .invisible()
++                    .group_hover(group_name.clone(), |s| s.visible())
++                    .text_color(rgb(0x539bf5))
++                    .cursor_pointer()
++                    .child("+")
++                    .on_click(move |_, window, cx| {
++                        let anchor = anchor.clone();
++                        entity.update(cx, |this, cx| this.open_new_comment(anchor, window, cx));
++                    }),
++            );
++        }
++        c
++    };
++    cell.child(add)
++        .child(
++            div()
++                .w(px(40.))
++                .flex_shrink_0()
++                .text_right()
++                .pr_1()
++                .text_color(cx.theme().muted_foreground)
++                .child(SharedString::from(half.line_no.to_string())),
++        )
++        .child(code_cell(&half.text, lang, cx))
++        .into_any_element()
+ }
+ 
+ /// The anchor a new comment on `line` would use.
+@@ -1195,12 +1490,66 @@ fn anchor_for_line(path: &str, line: &DiffLine) -> CommentAnchor {
+     }
+ }
+ 
++/// Maps a semantic highlight kind to a color (catppuccin-mocha-ish, tuned for
++/// the dark theme).
++fn highlight_style(kind: syntax::Highlight) -> gpui::HighlightStyle {
++    use syntax::Highlight as H;
++    let color = match kind {
++        H::Keyword => rgb(0xcba6f7),
++        H::Function => rgb(0x89b4fa),
++        H::Type => rgb(0xf9e2af),
++        H::String => rgb(0xa6e3a1),
++        H::Number | H::Constant => rgb(0xfab387),
++        H::Comment => rgb(0x7f849c),
++        H::Operator => rgb(0x89dceb),
++        H::Punctuation => rgb(0xbac2de),
++        H::Property => rgb(0x89b4fa),
++        H::Variable => rgb(0xcdd6f4),
++    };
++    gpui::HighlightStyle {
++        color: Some(color.into()),
++        ..Default::default()
++    }
++}
++
++/// Builds the code cell for a line, syntax-highlighted when a language is known.
++fn code_cell(text: &str, lang: Option<syntax::Lang>, cx: &App) -> gpui::AnyElement {
++    let spans = lang
++        .map(|l| syntax::highlight_line(l, text))
++        .unwrap_or_default();
++    if spans.is_empty() {
++        return div()
++            .flex_1()
++            .min_w_0()
++            .overflow_hidden()
++            .whitespace_nowrap()
++            .child(SharedString::from(text.to_string()))
++            .into_any_element();
++    }
++    let highlights: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = spans
++        .iter()
++        .map(|s| (s.start..s.end, highlight_style(s.kind)))
++        .collect();
++    let _ = cx;
++    div()
++        .flex_1()
++        .min_w_0()
++        .overflow_hidden()
++        .whitespace_nowrap()
++        .child(
++            gpui::StyledText::new(SharedString::from(text.to_string()))
++                .with_highlights(highlights),
++        )
++        .into_any_element()
++}
++
+ fn render_diff_line(
+     line: &DiffLine,
+     in_comment_range: bool,
+     row_ix: usize,
+     zed: Option<(PathBuf, Option<u32>)>,
+     anchor: Option<CommentAnchor>,
++    lang: Option<syntax::Lang>,
+     entity: &Entity<PrSessionView>,
+     cx: &App,
+ ) -> gpui::AnyElement {
+@@ -1284,14 +1633,7 @@ fn render_diff_line(
+                 .text_color(cx.theme().muted_foreground)
+                 .child(SharedString::from(marker)),
+         )
+-        .child(
+-            div()
+-                .flex_1()
+-                .min_w_0()
+-                .overflow_hidden()
+-                .whitespace_nowrap()
+-                .child(SharedString::from(line.text().to_string())),
+-        )
++        .child(code_cell(line.text(), lang, cx))
+         .into_any_element()
+ }
+ 
+@@ -1442,11 +1784,7 @@ fn render_thread_card(
+                     .border_t_1()
+                     .border_color(cx.theme().border.opacity(0.5))
+                     .child(meta)
+-                    .child(
+-                        div()
+-                            .text_sm()
+-                            .child(SharedString::from(comment.body_markdown.clone())),
+-                    ),
++                    .child(render_comment_body(&comment.body_markdown, cx)),
+             );
+         }
+ 
+@@ -1507,6 +1845,71 @@ fn small_tag(label: &'static str, color: gpui::Hsla) -> impl IntoElement {
+         .child(SharedString::from(label))
+ }
+ 
++/// Lightweight markdown for comment bodies: preserves line breaks and renders
++/// ``` fenced blocks in monospace. Full markdown (via a text engine) is a
++/// later enhancement.
++fn render_comment_body(body: &str, cx: &App) -> gpui::AnyElement {
++    let mut container = div().flex().flex_col().gap_1().text_sm();
++    let mut in_fence = false;
++    let mut code_buf: Vec<String> = Vec::new();
++    let mut text_buf: Vec<String> = Vec::new();
++
++    let flush_text = |container: gpui::Div, buf: &mut Vec<String>| -> gpui::Div {
++        if buf.is_empty() {
++            return container;
++        }
++        let lines = std::mem::take(buf);
++        container.child(
++            div().flex().flex_col().children(
++                lines
++                    .into_iter()
++                    .map(|l| div().child(SharedString::from(l))),
++            ),
++        )
++    };
++    let flush_code = |container: gpui::Div, buf: &mut Vec<String>, cx: &App| -> gpui::Div {
++        if buf.is_empty() {
++            return container;
++        }
++        let lines = std::mem::take(buf);
++        container.child(
++            div()
++                .font_family(MONO)
++                .px_2()
++                .py_1()
++                .rounded_md()
++                .bg(cx.theme().background.opacity(0.6))
++                .children(
++                    lines
++                        .into_iter()
++                        .map(|l| div().whitespace_nowrap().overflow_hidden().child(SharedString::from(l))),
++                ),
++        )
++    };
++
++    for line in body.lines() {
++        if line.trim_start().starts_with("```") {
++            if in_fence {
++                container = flush_code(container, &mut code_buf, cx);
++                in_fence = false;
++            } else {
++                container = flush_text(container, &mut text_buf);
++                in_fence = true;
++            }
++            continue;
++        }
++        if in_fence {
++            code_buf.push(line.to_string());
++        } else {
++            text_buf.push(line.to_string());
++        }
++    }
++    // Unclosed fence: render what we gathered as code anyway.
++    container = flush_text(container, &mut text_buf);
++    container = flush_code(container, &mut code_buf, cx);
++    container.into_any_element()
++}
++
+ /// Blocking: runs on the background executor.
+ fn fetch_diff(client: &GithubClient, pr: &PrSummary) -> Result<LoadedDiff, String> {
+     let pr_files = client
+@@ -1603,7 +2006,10 @@ impl Render for PrSessionView {
+                             list(self.list_state.clone(), move |ix, _window, cx| {
+                                 let entity = row_entity.clone();
+                                 let this = entity.read(cx);
+-                                this.render_diff_row(ix, &row_entity, cx)
++                                match this.view_mode {
++                                    ViewMode::Unified => this.render_diff_row(ix, &row_entity, cx),
++                                    ViewMode::Split => this.render_split_row(ix, &row_entity, cx),
++                                }
+                             })
+                             .size_full(),
+                         ),
+@@ -1613,6 +2019,17 @@ impl Render for PrSessionView {
+         };
+         let mut root = div()
+             .track_focus(&self.focus_handle)
++            .key_context(SESSION_KEY_CONTEXT)
++            .on_action(cx.listener(|this, _: &NextFile, _, cx| this.step_file(1, cx)))
++            .on_action(cx.listener(|this, _: &PrevFile, _, cx| this.step_file(-1, cx)))
++            .on_action(cx.listener(|this, _: &NextThread, _, cx| this.step_thread(1, cx)))
++            .on_action(cx.listener(|this, _: &PrevThread, _, cx| this.step_thread(-1, cx)))
++            .on_action(cx.listener(|this, _: &RefreshSession, _, cx| this.refresh(cx)))
++            .on_action(cx.listener(|this, _: &DismissOverlay, _, cx| {
++                if !this.dismiss_overlay(cx) {
++                    cx.emit(SessionEvent::Close);
++                }
++            }))
+             .flex()
+             .flex_col()
+             .size_full()
+diff --git a/crates/syntax/Cargo.toml b/crates/syntax/Cargo.toml
+new file mode 100644
+index 0000000..9340c0f
+--- /dev/null
++++ b/crates/syntax/Cargo.toml
+@@ -0,0 +1,16 @@
++[package]
++name = "syntax"
++version = "0.1.0"
++edition = "2024"
++description = "Tree-sitter syntax highlighting for diff lines. UI-free."
++
++[dependencies]
++# Pinned to match gpui-component's tree-sitter (native `links` allows one version).
++tree-sitter = "0.25"
++tree-sitter-highlight = "0.25"
++tree-sitter-rust = "0.24"
++tree-sitter-typescript = "0.23"
++tree-sitter-javascript = "0.25"
++tree-sitter-python = "0.25"
++tree-sitter-go = "0.25"
++tree-sitter-json = "0.24"
+diff --git a/crates/syntax/src/lib.rs b/crates/syntax/src/lib.rs
+new file mode 100644
+index 0000000..9fea9ac
+--- /dev/null
++++ b/crates/syntax/src/lib.rs
+@@ -0,0 +1,225 @@
++//! Minimal tree-sitter syntax highlighting for individual diff lines.
++//!
++//! UI-free: returns semantic [`HighlightSpan`]s (byte ranges + a coarse kind)
++//! that the caller maps to colors. Lines are highlighted in isolation, which
++//! is imperfect for constructs that span lines (block comments, multi-line
++//! strings) but robust and fast for a diff viewer.
++
++use std::sync::OnceLock;
++use tree_sitter::Language;
++use tree_sitter_highlight::{HighlightConfiguration, Highlighter};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
++pub enum Lang {
++    Rust,
++    TypeScript,
++    Tsx,
++    JavaScript,
++    Python,
++    Go,
++    Json,
++}
++
++/// A coarse highlight category. Kept small and editor-agnostic; the UI maps
++/// each to a theme color.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Highlight {
++    Keyword,
++    Function,
++    Type,
++    String,
++    Number,
++    Comment,
++    Constant,
++    Operator,
++    Punctuation,
++    Property,
++    Variable,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct HighlightSpan {
++    pub start: usize,
++    pub end: usize,
++    pub kind: Highlight,
++}
++
++/// Picks a language from a file path's extension.
++pub fn lang_for_path(path: &str) -> Option<Lang> {
++    let ext = path.rsplit('.').next()?;
++    Some(match ext {
++        "rs" => Lang::Rust,
++        "ts" | "mts" | "cts" => Lang::TypeScript,
++        "tsx" => Lang::Tsx,
++        "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
++        "py" | "pyi" => Lang::Python,
++        "go" => Lang::Go,
++        "json" => Lang::Json,
++        _ => return None,
++    })
++}
++
++/// The capture names we recognize, in priority order. A capture like
++/// `function.method` matches the `function` prefix.
++const RECOGNIZED: &[(&str, Highlight)] = &[
++    ("keyword", Highlight::Keyword),
++    ("function", Highlight::Function),
++    ("method", Highlight::Function),
++    ("type", Highlight::Type),
++    ("constructor", Highlight::Type),
++    ("string", Highlight::String),
++    ("number", Highlight::Number),
++    ("comment", Highlight::Comment),
++    ("constant", Highlight::Constant),
++    ("operator", Highlight::Operator),
++    ("punctuation", Highlight::Punctuation),
++    ("property", Highlight::Property),
++    ("variable", Highlight::Variable),
++];
++
++fn highlight_names() -> Vec<String> {
++    RECOGNIZED.iter().map(|(name, _)| name.to_string()).collect()
++}
++
++fn config_for(lang: Lang) -> Option<&'static HighlightConfiguration> {
++    macro_rules! lazy_config {
++        ($cell:ident, $language:expr, $highlights:expr, $name:expr) => {{
++            static $cell: OnceLock<Option<HighlightConfiguration>> = OnceLock::new();
++            $cell
++                .get_or_init(|| {
++                    let language: Language = $language;
++                    let mut cfg =
++                        HighlightConfiguration::new(language, $name, $highlights, "", "").ok()?;
++                    cfg.configure(&highlight_names());
++                    Some(cfg)
++                })
++                .as_ref()
++        }};
++    }
++
++    match lang {
++        Lang::Rust => lazy_config!(
++            RUST,
++            tree_sitter_rust::LANGUAGE.into(),
++            tree_sitter_rust::HIGHLIGHTS_QUERY,
++            "rust"
++        ),
++        Lang::TypeScript => lazy_config!(
++            TS,
++            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
++            tree_sitter_typescript::HIGHLIGHTS_QUERY,
++            "typescript"
++        ),
++        Lang::Tsx => lazy_config!(
++            TSX,
++            tree_sitter_typescript::LANGUAGE_TSX.into(),
++            tree_sitter_typescript::HIGHLIGHTS_QUERY,
++            "tsx"
++        ),
++        Lang::JavaScript => lazy_config!(
++            JS,
++            tree_sitter_javascript::LANGUAGE.into(),
++            tree_sitter_javascript::HIGHLIGHT_QUERY,
++            "javascript"
++        ),
++        Lang::Python => lazy_config!(
++            PY,
++            tree_sitter_python::LANGUAGE.into(),
++            tree_sitter_python::HIGHLIGHTS_QUERY,
++            "python"
++        ),
++        Lang::Go => lazy_config!(
++            GO,
++            tree_sitter_go::LANGUAGE.into(),
++            tree_sitter_go::HIGHLIGHTS_QUERY,
++            "go"
++        ),
++        Lang::Json => lazy_config!(
++            JSON,
++            tree_sitter_json::LANGUAGE.into(),
++            tree_sitter_json::HIGHLIGHTS_QUERY,
++            "json"
++        ),
++    }
++}
++
++/// Highlights a single line. Returns non-overlapping spans in source order;
++/// gaps between spans are unstyled. Empty on any parse failure.
++pub fn highlight_line(lang: Lang, line: &str) -> Vec<HighlightSpan> {
++    if line.trim().is_empty() {
++        return Vec::new();
++    }
++    let Some(config) = config_for(lang) else {
++        return Vec::new();
++    };
++    let mut highlighter = Highlighter::new();
++    let Ok(events) = highlighter.highlight(config, line.as_bytes(), None, |_| None) else {
++        return Vec::new();
++    };
++
++    let mut spans = Vec::new();
++    let mut stack: Vec<Highlight> = Vec::new();
++    for event in events.flatten() {
++        use tree_sitter_highlight::HighlightEvent as E;
++        match event {
++            E::HighlightStart(h) => {
++                stack.push(RECOGNIZED[h.0].1);
++            }
++            E::HighlightEnd => {
++                stack.pop();
++            }
++            E::Source { start, end } => {
++                if let Some(&kind) = stack.last() {
++                    if end > start {
++                        spans.push(HighlightSpan { start, end, kind });
++                    }
++                }
++            }
++        }
++    }
++    spans
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn lang_detection() {
++        assert_eq!(lang_for_path("src/a.rs"), Some(Lang::Rust));
++        assert_eq!(lang_for_path("app/x.tsx"), Some(Lang::Tsx));
++        assert_eq!(lang_for_path("a.unknownext"), None);
++    }
++
++    #[test]
++    fn rust_line_highlights_keyword_and_string() {
++        let spans = highlight_line(Lang::Rust, r#"let name = "hello";"#);
++        assert!(!spans.is_empty(), "expected some highlights");
++        // `let` is a keyword.
++        assert!(
++            spans.iter().any(|s| s.kind == Highlight::Keyword),
++            "expected a keyword span: {spans:?}"
++        );
++        // The string literal is captured.
++        assert!(
++            spans.iter().any(|s| s.kind == Highlight::String),
++            "expected a string span: {spans:?}"
++        );
++        // Spans are within bounds and ordered.
++        for s in &spans {
++            assert!(s.end <= r#"let name = "hello";"#.len());
++            assert!(s.start < s.end);
++        }
++    }
++
++    #[test]
++    fn blank_line_is_empty() {
++        assert!(highlight_line(Lang::Rust, "   ").is_empty());
++    }
++
++    #[test]
++    fn typescript_and_python_parse() {
++        assert!(!highlight_line(Lang::TypeScript, "const x: number = 1;").is_empty());
++        assert!(!highlight_line(Lang::Python, "def f(): return 1").is_empty());
++    }
++}
+diff --git a/docs/superpowers/specs/2026-07-18-local-repository-review-design.md b/docs/superpowers/specs/2026-07-18-local-repository-review-design.md
+new file mode 100644
+index 0000000..367856c
+--- /dev/null
++++ b/docs/superpowers/specs/2026-07-18-local-repository-review-design.md
+@@ -0,0 +1,170 @@
++# Local repository review — design
++
++## Context
++
++prdesk today reviews GitHub PRs only: you land on a global PR queue, open one,
++and review its diff with inline threads. This adds the ability to **open any
++local repository** and either review its local changes (no PR) or jump to that
++repo's PRs. It removes the need to already have a PR to look at a diff in the
++app, and turns prdesk into a pre-push self-review tool as well as a PR review
++tool.
++
++## Goals
++
++- Open a local clone and **review its diff with no PR involved** — either the
++  current branch vs its base, or uncommitted changes.
++- From a local repo, **jump into that repo's PRs** (the existing PR experience,
++  scoped to the repo).
++- Reuse the existing diff experience (file sidebar, unified/side-by-side,
++  syntax highlighting, `]`/`[` nav, ⌘-click to Zed) for local review.
++
++## Non-goals (v1)
++
++- Local review is **read-only**: no comment threads, no composer, no merge.
++  There is no PR to attach comments to; the workflow is review → jump to Zed to
++  edit. (Leaving notes-to-self is a possible later addition.)
++- No staging/committing/git actions from the app beyond reading diffs.
++- No remote hosts other than GitHub for the PRs action.
++
++## User-facing behavior
++
++### Navigation
++
++The window gains a top-level toggle: **PRs** (today's global queue, unchanged)
++and **Repos** (new). The Repos view is a `RepoPickerView` listing local clones:
++
++- Auto-discovered by scanning `config.clone_roots` (depth 3) plus any paths in
++  `config.clones`, deduplicated, each resolved to its `owner/name` via the
++  origin remote (reusing `repo_local::origin_repo` / `find_clone`).
++- Each row shows the repo name + path and two actions:
++  - **Review local changes** → opens a `LocalSessionView` for that clone.
++  - **View PRs** → opens the PR list scoped to `repo:owner/name`.
++- An **"Open folder…"** button opens a native folder picker (GPUI
++  `cx.prompt_for_paths`) for a clone not in the list.
++
++CLI: `prdesk <path>` opens that repo's local review directly (bypassing the
++picker). A non-existent path prints an error and opens the normal window.
++
++### Local review session
++
++Same diff surface as PR review, minus the PR-only bits:
++
++- Header: `repo-name · branch ← base`, with a **mode toggle** (Branch vs base /
++  Uncommitted), the **Split/Unified** toggle, **Refresh**, and **Open repo in
++  Zed**.
++- Body: the shared diff pane — file sidebar (status marker + `+`/`−` stats, no
++  comment badge), and the unified or side-by-side diff with syntax
++  highlighting.
++- ⌘-click a line opens it in Zed (the clone is by definition on the branch, so
++  line numbers are trustworthy in Uncommitted / Branch-head modes).
++- Keyboard: `]`/`[` next/prev file, `r` refresh, `esc` back. (`n`/`p` thread
++  nav is a no-op here.)
++
++Two local diff modes:
++
++- **Branch vs base** (default): `git diff <base>...<head>` (three-dot =
++  merge-base diff, matching what a PR would show). `base` auto-detected from
++  `origin/HEAD` (falls back to `main`, then `master`); overridable via a small
++  text field in the header.
++- **Uncommitted**: `git diff HEAD` (staged + unstaged vs HEAD).
++
++Empty diff (clean tree / no divergence) shows a friendly "no changes" state.
++
++## Internal structure (Approach A: shared diff pane)
++
++### `diff_kit` — `parse_git_diff`
++
++```rust
++pub fn parse_git_diff(diff: &str) -> Vec<FileDiff>;
++```
++
++Parses full `git diff` output into the existing `FileDiff` model:
++
++- Splits on `diff --git a/… b/…` file boundaries.
++- Per file: reads `new file mode` / `deleted file mode` / `rename from|to`
++  and `Binary files … differ` markers to set `FileStatus`, `old_path`, and
++  `is_binary_or_too_large`.
++- Reuses the existing hunk parser on each file's `@@ … @@` section (extracted
++  as `parse_hunks` so both `parse_patch` and `parse_git_diff` share it).
++
++UI-free; fixture-tested against recorded real `git diff` output covering
++modify, add, delete, rename, and binary.
++
++### `repo_local` — local diff helpers
++
++```rust
++pub fn default_base(clone: &Path) -> Result<String>;      // origin/HEAD → main → master
++pub fn branch_diff(clone: &Path, base: &str) -> Result<String>;   // git diff base...HEAD
++pub fn uncommitted_diff(clone: &Path) -> Result<String>;          // git diff HEAD
++```
++
++All shell out to `git` via the existing helper, consistent with checkout.
++
++### `diff_pane` module (new, in `prdesk`)
++
++The shared diff rendering, lifted out of `PrSessionView`:
++
++- Free functions already at module scope (`code_cell`, `highlight_style`,
++  `render_diff_line`, `render_half`, `outdated_header_el`, `anchor_for_line`)
++  move here.
++- `render_file_header`, `render_hunk_header`, and the file-sidebar row move
++  here as free functions taking plain data (`&[FileDiff]`, stats,
++  `zed_target`, an optional `badge: Option<u32>`).
++- PR-only interactivity becomes optional hooks passed by the caller:
++  - `add_comment: Option<Rc<dyn Fn(CommentAnchor, &mut Window, &mut App)>>` —
++    drives the `+`-to-comment affordance; `None` in local mode (no `+`).
++  - thread/outdated rows are rendered by a caller-provided
++    `render_thread: Option<Rc<dyn Fn(usize, &NodeId) -> AnyElement>>`; local
++    rows never contain thread variants, so `None` is safe.
++- A `render_diff_body(...)` helper builds the sidebar + `list()` layout given a
++  row-dispatch closure, so both sessions share the wiring.
++
++`ViewMode` (Unified/Split) moves to `diff_pane` since both sessions use it.
++
++### `PrSessionView` refactor
++
++Renders through `diff_pane`, passing `Some(add_comment)` and
++`Some(render_thread)`. Its threads/composer/review-drawer/merge/checkout code
++is unchanged. Verified post-refactor by driving the running app against a real
++PR.
++
++### `LocalSessionView` (new)
++
++Small. Holds clone path, repo id, base, current branch, mode, `files`,
++`view_mode`, `selected_file`, `list_state`, `sidebar_scroll`, load state, focus.
++Fetches the git diff on the background executor, parses via
++`diff_kit::parse_git_diff`, and renders through `diff_pane` with no PR hooks.
++Reuses the existing `SESSION_KEY_CONTEXT` bindings.
++
++### `Workspace` + `RepoPickerView`
++
++`Workspace` grows a `Tab { Prs, Repos }` and renders the PRs/Repos toggle. It
++holds `pr_list`, an optional `pr_session`, an optional `local_session`, and a
++`repo_picker`. `RepoPickerView` emits events: `OpenLocal(path)` and
++`OpenRepoPrs(RepoId)`; the workspace opens the corresponding session (for
++`OpenRepoPrs` it re-scopes and shows the PR list).
++
++## Isolation
++
++`parse_git_diff` and the `repo_local` helpers are UI-free. Only `prdesk`
++touches gpui (`diff_pane`, `LocalSessionView`, `RepoPickerView` all live in the
++app crate). `scripts/check-gpui-isolation.sh` continues to enforce this.
++
++## Milestones
++
++- **L1** — `diff_kit::parse_git_diff` (+ shared `parse_hunks`) and the
++  `repo_local` diff/base helpers, with tests. No UI.
++- **L2** — extract `diff_pane`; refactor `PrSessionView` onto it; verify the PR
++  path still works.
++- **L3** — `LocalSessionView`; open it via a temporary path (e.g. CLI arg) to
++  test end-to-end against a real local repo.
++- **L4** — `RepoPickerView`, the PRs/Repos navigation, the folder picker, and
++  the repo-scoped PRs action.
++
++## Verification
++
++- `cargo test` for `parse_git_diff` (fixtures: modify/add/delete/rename/binary)
++  and a `repo_local` integration test creating a real temp repo with a branch.
++- Drive the running app: open a real local clone (this repo), confirm branch
++  and uncommitted diffs render with highlighting; confirm the PR path is
++  unregressed; confirm ⌘-click opens the right line in Zed.

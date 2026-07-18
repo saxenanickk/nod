@@ -49,3 +49,40 @@ fn finds_and_reads_a_real_clone() {
 
     std::fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn local_diffs() {
+    let clone = std::env::temp_dir().join(format!("prdesk-diff-{}", std::process::id()));
+    std::fs::create_dir_all(&clone).unwrap();
+    git(&clone, &["init", "-q", "-b", "main"]);
+    git(&clone, &["config", "user.email", "t@example.com"]);
+    git(&clone, &["config", "user.name", "T"]);
+    std::fs::write(clone.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-q", "-m", "init"]);
+
+    // No origin remote → default_base falls back to the existing `main`.
+    assert_eq!(repo_local::default_base(&clone).unwrap(), "main");
+
+    // Branch with a committed change.
+    git(&clone, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(clone.join("b.txt"), "new file\n").unwrap();
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-q", "-m", "add b"]);
+
+    let branch = repo_local::branch_diff(&clone, "main").unwrap();
+    assert!(branch.contains("diff --git"), "branch diff has file headers");
+    assert!(branch.contains("b.txt"), "branch diff includes the new file");
+
+    // Uncommitted edit shows only in the uncommitted diff.
+    std::fs::write(clone.join("a.txt"), "one\nCHANGED\nthree\n").unwrap();
+    let uncommitted = repo_local::uncommitted_diff(&clone).unwrap();
+    assert!(uncommitted.contains("a.txt"), "uncommitted diff includes edit");
+    assert!(uncommitted.contains("+CHANGED"), "shows the changed line");
+    assert!(
+        !repo_local::branch_diff(&clone, "main").unwrap().contains("CHANGED"),
+        "branch diff excludes uncommitted work"
+    );
+
+    std::fs::remove_dir_all(&clone).ok();
+}

@@ -1,9 +1,11 @@
 //! Diff parsing, row layout, and review-comment anchor mapping — the
 //! correctness core of prdesk. UI-free by design.
 
+mod git_diff;
 mod layout;
 mod parse;
 
+pub use git_diff::parse_git_diff;
 pub use layout::{
     DiffRow, HalfKind, HalfRow, LayoutOptions, SplitRow, layout_split, layout_unified,
 };

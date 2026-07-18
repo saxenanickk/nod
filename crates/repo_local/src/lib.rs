@@ -41,6 +41,36 @@ pub fn stash_all(clone: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// The repo's default base branch: `origin/HEAD`'s target, else `main`, else
+/// `master`.
+pub fn default_base(clone: &Path) -> Result<String> {
+    // `origin/HEAD` symbolic ref → e.g. "refs/remotes/origin/main".
+    if let Ok(sym) = git(clone, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        if let Some(name) = sym.rsplit('/').next() {
+            if !name.is_empty() {
+                return Ok(name.to_string());
+            }
+        }
+    }
+    for candidate in ["main", "master"] {
+        if git(clone, &["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
+            return Ok(candidate.to_string());
+        }
+    }
+    bail!("could not determine a base branch; set one explicitly")
+}
+
+/// Diff of the current branch against `base` using the merge base
+/// (`git diff base...HEAD`), i.e. what a PR from this branch would show.
+pub fn branch_diff(clone: &Path, base: &str) -> Result<String> {
+    git(clone, &["diff", &format!("{base}...HEAD")])
+}
+
+/// Uncommitted changes: working tree + index vs HEAD (`git diff HEAD`).
+pub fn uncommitted_diff(clone: &Path) -> Result<String> {
+    git(clone, &["diff", "HEAD"])
+}
+
 /// Checks out a PR branch via `gh pr checkout` (handles forks and upstream
 /// tracking). Runs with the user's active gh account, whose git credentials
 /// the clone already uses.
