@@ -25,7 +25,39 @@ use workspace::Workspace;
 
 actions!(nod, [Quit]);
 
+/// Apps launched from Finder/Launchpad inherit only a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), so Homebrew tools like `gh` (and the
+/// `zed` CLI in `/usr/local/bin`) aren't found even though they work in a
+/// terminal. Recover the login shell's PATH and ensure the common bin dirs are
+/// present, before anything shells out. Must run before any threads spawn.
+fn restore_full_path() {
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    // Prefer the user's real login-shell PATH (covers Homebrew, asdf, etc.
+    // wherever they installed it). `SHELL` is an absolute path, so this works
+    // without a usable PATH itself.
+    if let Ok(shell) = std::env::var("SHELL") {
+        if let Ok(out) = std::process::Command::new(&shell)
+            .args(["-lc", "printf %s \"$PATH\""])
+            .output()
+        {
+            let shell_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && shell_path.contains('/') {
+                path = shell_path;
+            }
+        }
+    }
+    // Belt-and-suspenders for the common macOS locations.
+    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        if !path.split(':').any(|p| p == dir) {
+            path = if path.is_empty() { dir.to_string() } else { format!("{dir}:{path}") };
+        }
+    }
+    // SAFETY: called at the very start of `main`, before any threads spawn.
+    unsafe { std::env::set_var("PATH", path) };
+}
+
 fn main() {
+    restore_full_path();
     let config = config::load_or_init();
     // `nod <path>` opens that local repo's review directly.
     let open_local = std::env::args().nth(1).and_then(|arg| {

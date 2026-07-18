@@ -10,7 +10,7 @@ cd "$ROOT"
 
 APP_NAME="nod"
 BUNDLE_ID="com.saxenanickk.nod"
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 ICONSET="$(mktemp -d)/${APP_NAME}.iconset"
 mkdir -p "$ICONSET"
