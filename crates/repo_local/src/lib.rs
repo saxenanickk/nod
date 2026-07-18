@@ -71,6 +71,33 @@ pub fn uncommitted_diff(clone: &Path) -> Result<String> {
     git(clone, &["diff", "HEAD"])
 }
 
+/// The open PR associated with the clone's current branch, if any, as
+/// `(base repo, number)`. Uses `gh pr view` (extracting fields with `--jq` so
+/// no JSON dependency is needed here); returns `None` when there's no PR.
+pub fn branch_pr(clone: &Path) -> Option<(RepoId, u64)> {
+    let out = Command::new("gh")
+        .current_dir(clone)
+        .args(["pr", "view", "--json", "number,url", "--jq", ".number, .url"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    let number: u64 = lines.next()?.trim().parse().ok()?;
+    // URL like https://github.com/{owner}/{repo}/pull/N
+    let url = lines.next()?.trim();
+    let rest = url.split("github.com/").nth(1)?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.to_string();
+    let name = parts.next()?.to_string();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((RepoId { owner, name }, number))
+}
+
 /// Checks out a PR branch via `gh pr checkout` (handles forks and upstream
 /// tracking). Runs with the user's active gh account, whose git credentials
 /// the clone already uses.

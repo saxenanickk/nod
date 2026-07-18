@@ -80,10 +80,10 @@ impl Workspace {
         }
     }
 
-    /// Debug entry point: open a PR session by `owner/repo#number` with a
-    /// minimal summary (fetch only needs repo + number). Gated on the
-    /// `PRDESK_DEBUG_PR` env var in main.
-    pub fn open_pr_debug(&mut self, repo: RepoId, number: u64, cx: &mut Context<Self>) {
+    /// Opens a PR session by `owner/repo#number` with a minimal summary
+    /// (fetch only needs repo + number; other fields fill in on refresh).
+    /// Used by the local→PR bridge and the `PRDESK_DEBUG_PR` hook.
+    pub fn open_pr_by_number(&mut self, repo: RepoId, number: u64, cx: &mut Context<Self>) {
         let pr = PrSummary {
             repo,
             number: github_types::PrNumber(number),
@@ -136,6 +136,12 @@ impl Workspace {
                     this.local = None;
                     this._local_subscription = None;
                     cx.notify();
+                }
+                LocalSessionEvent::OpenPr { repo, number } => {
+                    // Leave local review and open the real PR (commenting works there).
+                    this.local = None;
+                    this._local_subscription = None;
+                    this.open_pr_by_number(repo.clone(), *number, cx);
                 }
             },
         ));

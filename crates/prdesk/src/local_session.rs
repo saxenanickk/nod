@@ -22,6 +22,8 @@ use std::path::PathBuf;
 
 pub enum LocalSessionEvent {
     Close,
+    /// Open the PR associated with this branch (for commenting/review).
+    OpenPr { repo: github_types::RepoId, number: u64 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,7 @@ struct LoadedLocal {
     branch: String,
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
+    branch_pr: Option<(github_types::RepoId, u64)>,
 }
 
 pub struct LocalSessionView {
@@ -51,6 +54,7 @@ pub struct LocalSessionView {
     load: LocalLoad,
     files: Vec<FileDiff>,
     stats: Vec<(u64, u64)>,
+    branch_pr: Option<(github_types::RepoId, u64)>,
     rows: Vec<DiffRow>,
     split_rows: Vec<SplitRow>,
     view_mode: ViewMode,
@@ -80,6 +84,7 @@ impl LocalSessionView {
             clone,
             repo_label,
             branch: String::new(),
+            branch_pr: None,
             base_input,
             mode: LocalMode::BranchVsBase,
             load: LocalLoad::Loading,
@@ -141,6 +146,7 @@ impl LocalSessionView {
                         this.branch = loaded.branch;
                         this.files = loaded.files;
                         this.stats = loaded.stats;
+                        this.branch_pr = loaded.branch_pr;
                         this.load = LocalLoad::Ready;
                         this.relayout();
                     }
@@ -357,6 +363,21 @@ impl LocalSessionView {
                     .xsmall()
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
+            // If this branch has an open PR, offer to review/comment on it.
+            .when_some(self.branch_pr.clone(), |row, (repo, number)| {
+                row.child(
+                    Button::new("local-review-pr")
+                        .label(format!("Review PR #{number}"))
+                        .primary()
+                        .xsmall()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(LocalSessionEvent::OpenPr {
+                                repo: repo.clone(),
+                                number,
+                            })
+                        })),
+                )
+            })
             .child(
                 Button::new("local-open-zed")
                     .label("Open repo in Zed")
@@ -387,7 +408,8 @@ fn fetch_local(clone: &std::path::Path, mode: LocalMode, base: &str) -> Result<L
     };
     let files = diff_kit::parse_git_diff(&raw).map_err(|e| e.to_string())?;
     let stats = files.iter().map(file_stats).collect();
-    Ok(LoadedLocal { branch, files, stats })
+    let branch_pr = repo_local::branch_pr(clone);
+    Ok(LoadedLocal { branch, files, stats, branch_pr })
 }
 
 fn file_stats(f: &FileDiff) -> (u64, u64) {
