@@ -93,17 +93,18 @@ impl RepoPickerView {
             .flex()
             .items_center()
             .gap_3()
-            .px_3()
-            .py_2()
+            .px_4()
+            .py_3()
             .border_b_1()
             .border_color(cx.theme().border)
+            .hover(|el| el.bg(cx.theme().secondary.opacity(0.4)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui::FontWeight::MEDIUM)
                             .truncate()
                             .child(SharedString::from(repo.label.clone())),
                     )
@@ -118,7 +119,7 @@ impl RepoPickerView {
             .child(
                 Button::new(SharedString::from(format!("local-{}", repo.path.display())))
                     .label("Review local changes")
-                    .primary()
+                    .outline()
                     .xsmall()
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(RepoPickerEvent::OpenLocal(path_for_local.clone()))
@@ -202,9 +203,9 @@ impl Render for RepoPickerView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px_3()
+                    .px_4()
                     .py_2()
-                    .child(div().font_weight(gpui::FontWeight::BOLD).child("Repositories"))
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Repositories"))
                     .child(
                         div()
                             .flex()

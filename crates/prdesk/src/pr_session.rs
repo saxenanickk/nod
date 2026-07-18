@@ -16,8 +16,9 @@ use github_types::{
 use std::path::PathBuf;
 use std::rc::Rc;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
-    SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState, MouseButton,
+    Pixels, SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -1548,7 +1549,7 @@ impl PrSessionView {
             .into_any_element()
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_header(&self, left_pad: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let url = self.pr.url.clone();
         let thread_count = self.threads.len();
         let unresolved = self.threads.iter().filter(|t| !t.is_resolved).count();
@@ -1556,10 +1557,12 @@ impl PrSessionView {
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .py_2()
+            .h(px(crate::chrome::BAR_HEIGHT))
+            .pl(left_pad)
+            .pr_3()
+            .bg(cx.theme().title_bar)
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().title_bar_border)
             .child(
                 Button::new("back")
                     .label("‹ Back")
@@ -1568,11 +1571,14 @@ impl PrSessionView {
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
             )
             .child(
+                // The title doubles as the window-drag region.
                 div()
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .id("pr-title")
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .truncate()
                     .flex_1()
-                    .child(SharedString::from(self.pr.title.clone())),
+                    .child(SharedString::from(self.pr.title.clone()))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
             )
             .when(thread_count > 0, |el| {
                 el.child(
@@ -2182,7 +2188,8 @@ impl Focusable for PrSessionView {
 }
 
 impl Render for PrSessionView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let left_pad = crate::chrome::traffic_light_pad(window);
         let body: gpui::AnyElement = match &self.load {
             SessionLoad::Loading => div()
                 .flex()
@@ -2267,7 +2274,7 @@ impl Render for PrSessionView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_header(cx))
+            .child(self.render_header(left_pad, cx))
             .child(self.render_checkout_bar(cx))
             .child(body);
         if self.review_drawer.is_some() {

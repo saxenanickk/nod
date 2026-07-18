@@ -9,7 +9,7 @@ use crate::repo_picker::{RepoPickerEvent, RepoPickerView};
 use github_client::GithubClient;
 use github_types::{PrSummary, RepoId};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Subscription, Window, div, prelude::*,
+    App, Context, Entity, FocusHandle, Focusable, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _,
@@ -168,7 +168,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_nav(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let pad = crate::chrome::traffic_light_pad(window);
         let tab_button = |tab: Tab, label: &'static str, active: bool, cx: &mut Context<Self>| {
             let btn = Button::new(label).label(label).small();
             let btn = if active { btn.primary() } else { btn.ghost() };
@@ -181,12 +182,15 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .px_3()
-            .py_1()
+            .h(px(crate::chrome::BAR_HEIGHT))
+            .pl(pad)
+            .pr_3()
+            .bg(cx.theme().title_bar)
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().title_bar_border)
             .child(tab_button(Tab::Prs, "PRs", self.tab == Tab::Prs, cx))
             .child(tab_button(Tab::Repos, "Repos", self.tab == Tab::Repos, cx))
+            .child(crate::chrome::drag_region())
     }
 }
 
@@ -227,7 +231,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .child(self.render_nav(cx))
+            .child(self.render_nav(window, cx))
             .child(div().flex_1().min_h_0().child(content))
             .into_any_element()
     }

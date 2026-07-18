@@ -64,6 +64,10 @@ pub fn apply(cx: &mut App) {
     c.muted = h(SURFACE);
     c.muted_foreground = h(MUTED);
 
+    // Title bar: a hair above the background so the top bar reads as chrome.
+    c.title_bar = h(0x2c313a);
+    c.title_bar_border = h(BORDER);
+
     // Lists / sidebar.
     c.list = h(BG);
     c.list_hover = h(SURFACE);

@@ -15,7 +15,7 @@ use github_types::NodeId;
 use std::collections::HashSet;
 use std::rc::Rc;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
+    App, Context, Entity, FocusHandle, Focusable, ListAlignment, ListOffset, ListState, Pixels,
     SharedString, UniformListScrollHandle, Window, div, list, prelude::*, px, rgb, uniform_list,
 };
 use gpui_component::{
@@ -667,17 +667,19 @@ impl LocalSessionView {
         )
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_header(&self, left_pad: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let clone = self.clone.clone();
         let is_branch = self.mode == LocalMode::BranchVsBase;
         div()
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .py_2()
+            .h(px(crate::chrome::BAR_HEIGHT))
+            .pl(left_pad)
+            .pr_3()
+            .bg(cx.theme().title_bar)
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().title_bar_border)
             .child(
                 Button::new("local-back")
                     .label("‹ Back")
@@ -687,7 +689,7 @@ impl LocalSessionView {
             )
             .child(
                 div()
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .whitespace_nowrap()
                     .child(SharedString::from(self.repo_label.clone())),
             )
@@ -733,7 +735,7 @@ impl LocalSessionView {
                         .child(Input::new(&self.base_input).small()),
                 )
             })
-            .child(div().flex_1())
+            .child(crate::chrome::drag_region())
             .child(
                 Button::new("local-view")
                     .label(match self.view_mode {
@@ -868,7 +870,8 @@ impl Focusable for LocalSessionView {
 }
 
 impl Render for LocalSessionView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let left_pad = crate::chrome::traffic_light_pad(window);
         let body: gpui::AnyElement = match &self.load {
             LocalLoad::Loading => centered("Loading diff…", cx),
             LocalLoad::Failed(err) => centered(&format!("Failed to load diff: {err}"), cx),
@@ -934,7 +937,7 @@ impl Render for LocalSessionView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_header(cx))
+            .child(self.render_header(left_pad, cx))
             .child(body)
             .when(self.create_form.is_some(), |root| {
                 root.child(self.render_create_form(cx))

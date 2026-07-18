@@ -1,5 +1,6 @@
 //! prdesk — a GPUI-native GitHub PR review companion for Zed.
 
+mod chrome;
 mod config;
 mod diff_pane;
 mod file_tree;
